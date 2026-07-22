@@ -26,19 +26,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install openpyxl pillow google-api-python-client google-auth
 
-      - name: Pull live sheets (optional)
+      - name: Pull live sheets (required)
         env:
           GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-        continue-on-error: true
         run: |
           if [ -z "$GCP_SERVICE_ACCOUNT_KEY" ]; then
-            echo "No GCP credentials set - building from committed snapshots."
-            exit 0
+            echo "::error::GCP_SERVICE_ACCOUNT_KEY secret is empty or missing."
+            exit 1
           fi
-          echo "$GCP_SERVICE_ACCOUNT_KEY" > /tmp/key.json
+          printf '%s' "$GCP_SERVICE_ACCOUNT_KEY" > /tmp/key.json
+          # Fail fast with a clear message if the secret isn't valid JSON.
+          python -c "import json; json.load(open('/tmp/key.json')); print('Service-account key JSON is valid.')" \
+            || { echo "::error::GCP_SERVICE_ACCOUNT_KEY is not valid JSON - re-paste the full key file."; exit 1; }
           export GOOGLE_APPLICATION_CREDENTIALS=/tmp/key.json
-          python -c "import gsheets; gsheets.fetch_snapshots()" \
-            || echo "Live pull failed - continuing with committed snapshots."
+          python -c "import gsheets; gsheets.fetch_snapshots()"
+          echo "Live sheets pulled successfully."
 
       - name: Build report
         run: python main.py --no-image   # HTML only; PNG needs a browser (done locally for WhatsApp)
