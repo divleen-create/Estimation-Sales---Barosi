@@ -1,0 +1,53 @@
+name: Daily Sales Report
+
+on:
+  schedule:
+    - cron: '15 6 * * *'   # 11:45 AM IST (06:15 UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: write            # allow the job to push index.html back to the repo
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install openpyxl pillow google-api-python-client google-auth
+
+      - name: Pull live sheets (optional)
+        env:
+          GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+        continue-on-error: true
+        run: |
+          if [ -z "$GCP_SERVICE_ACCOUNT_KEY" ]; then
+            echo "No GCP credentials set - building from committed snapshots."
+            exit 0
+          fi
+          echo "$GCP_SERVICE_ACCOUNT_KEY" > /tmp/key.json
+          export GOOGLE_APPLICATION_CREDENTIALS=/tmp/key.json
+          python -c "import gsheets; gsheets.fetch_snapshots()" \
+            || echo "Live pull failed - continuing with committed snapshots."
+
+      - name: Build report
+        run: python main.py
+
+      - name: Commit and push updated report
+        run: |
+          cp output/index.html index.html
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html output/
+          git diff --cached --quiet || git commit -m "Auto-update daily report"
+          git push origin HEAD:main
