@@ -1,8 +1,9 @@
 name: Daily Sales Report
 
 on:
-  schedule:
-    - cron: '15 6 * * *'   # 11:45 AM IST (06:15 UTC)
+  # Triggered daily at 11:30 IST by cron-job.org via the workflow_dispatch API.
+  # GitHub's own schedule was removed on purpose: it fired late and unpredictably,
+  # which would re-publish the report with different numbers later in the day.
   workflow_dispatch:
 
 permissions:
