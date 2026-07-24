@@ -335,7 +335,7 @@ def render(m: ReportModel, generated: _dt.datetime, freshness=None) -> str:
     <div class="head">
       <div><div class="title">Daily Sales Report</div>
         <div class="sub">{_e(m.month_label)} · month-to-date</div></div>
-      <div class="asof">Data as of <b>{asof}</b><br>Generated {generated.strftime('%d %b %Y, %H:%M')}</div>
+      <div class="asof">Data as of <b>{asof}</b><br>Generated {generated.strftime('%d %b %Y, %H:%M')} IST</div>
     </div>
     {_kpi_block(m)}
   </div>
@@ -347,7 +347,7 @@ def render(m: ReportModel, generated: _dt.datetime, freshness=None) -> str:
 
 def write_html(generated: _dt.datetime | None = None, model: ReportModel | None = None,
                freshness=None) -> Path:
-    generated = generated or _dt.datetime.now()
+    generated = generated or _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=5, minutes=30)))
     m = model or build_report()
     if freshness is None:
         import qc  # local import avoids any import-order coupling

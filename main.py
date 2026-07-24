@@ -33,7 +33,10 @@ def main() -> None:
                     help="abort (no PNG) if any QC check fails")
     args = ap.parse_args()
 
-    generated = _dt.datetime.now()
+    # Stamp in IST (UTC+5:30) so the "Generated" time is correct no matter where
+    # this runs — the GitHub runner's clock is UTC.
+    IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+    generated = _dt.datetime.now(IST)
     # Build the model + sheet diagnostics ONCE and thread them through render + QC.
     model = build_report()
     diags = load_sheet_diagnostics()
