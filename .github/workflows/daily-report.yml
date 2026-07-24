@@ -43,7 +43,9 @@ jobs:
           echo "Live sheets pulled successfully."
 
       - name: Build report
-        run: python main.py --no-image   # HTML only; PNG needs a browser (done locally for WhatsApp)
+        # --strict: abort (non-zero exit) if the numbers don't reconcile against the
+        # sheet's OWN totals / internal identities, so discrepant data is never published.
+        run: python main.py --no-image --strict
 
       - name: Commit and push updated report
         run: |
