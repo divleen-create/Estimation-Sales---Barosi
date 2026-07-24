@@ -1,15 +1,15 @@
-QC self-check: 149/149 checks passed (all good)
+QC self-check: 151/151 checks passed (all good)
 
 Estimate freshness (our data-driven run-rate vs Excel's estimate cell):
   [OK] Blinkit: Excel updated & correct — ÷22×31, matches (₹3.77 Cr)
   [STALE] Big Basket: Excel divides by 21 but data supports 22 days; Excel ₹53.2 L vs correct ₹50.8 L
   [STALE] Swiggy: Excel divides by 20 but data supports 22 days; Excel ₹1.06 Cr vs correct ₹96.8 L
-  [OK] Zepto: Excel updated & correct — ÷21×31, matches (₹40.0 L)
+  [OK] Zepto: Excel updated & correct — ÷23×31, matches (₹39.6 L)
   [OK] Shopify: Excel updated & correct — ÷21×31, matches (₹32.5 L)
   [STALE] Amazon: Excel divides by 20 but data supports 21 days; Excel ₹1.94 Cr vs correct ₹1.85 Cr
   [--] Amazon Core: no Excel estimate cell; ours = ₹74.2 L (÷19 days)
   [--] Amazon NOW+Fresh: no Excel estimate cell; ours = ₹1.07 Cr (÷19 days)
-  [STALE] Flipkart: Excel divides by 12 but data supports 21 days; Excel ₹0.7 L vs correct ₹0.4 L
+  [STALE] Flipkart: Excel divides by 12 but data supports 22 days; Excel ₹0.7 L vs correct ₹0.4 L
   [OK] Minutes: Excel updated & correct — ÷19×31, matches (₹49.1 L)
   [STALE] First Club: Excel divides by 12 but data supports 18 days; Excel ₹1.28 Cr vs correct ₹85.7 L
 
