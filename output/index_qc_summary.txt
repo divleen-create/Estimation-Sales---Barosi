@@ -1,8 +1,8 @@
-QC self-check: 154/154 checks passed (all good)
+QC self-check: 155/155 checks passed (all good)
 
 Estimate freshness (our data-driven run-rate vs Excel's estimate cell):
   [STALE] Blinkit: Excel divides by 22 but data supports 24 days; Excel ₹4.11 Cr vs correct ₹3.77 Cr
-  [OK] Big Basket: Excel updated & correct — ÷24×31, matches (₹49.8 L)
+  [OK] Big Basket: Excel updated & correct — ÷25×31, matches (₹49.9 L)
   [OK] Swiggy: Excel updated & correct — ÷24×31, matches (₹95.6 L)
   [STALE] Zepto: Excel divides by 23 but data supports 24 days; Excel ₹41.1 L vs correct ₹39.4 L
   [STALE] Shopify: Excel divides by 21 but data supports 24 days; Excel ₹36.3 L vs correct ₹31.7 L
