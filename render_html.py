@@ -62,6 +62,7 @@ tbody tr:last-child td{border-bottom:none}
 .tot td{font-weight:800;border-top:2px solid var(--line);background:#fbfcfe}
 .pos{color:var(--pos1t);font-weight:700}
 .neg{color:var(--neg1t);font-weight:700}
+.gap0{color:var(--ink);font-weight:700}
 .na{color:var(--muted)}
 
 .grid-note{color:var(--muted);font-size:11px;margin:14px 0 6px}
@@ -135,15 +136,20 @@ def _e(s) -> str:
 
 
 def _growth_span(g):
-    cls = "pos" if (g or 0) > 0 else ("neg" if (g or 0) < 0 else "na")
+    p = (g or 0) * 100
+    cls = "na" if (g is None or round(p, 1) == 0) else ("pos" if p > 0 else "neg")
     return f'<span class="{cls}">{fmt.pct(g)}</span>'
 
 
 def _gap_span(v):
-    """Gap to estimate, coloured green (+ve) / red (-ve)."""
+    """Gap to estimate = estimate − MTD. A positive gap means we're still SHORT
+    of the run-rate estimate → red; MTD at/above estimate → green; ~zero → black.
+    Rounds to display resolution so a tiny residual reads '₹0.0 L', not '₹-0.0 L'."""
     if v is None:
         return '<span class="na">–</span>'
-    cls = "pos" if v > 0 else ("neg" if v < 0 else "na")
+    if round(v / 1e5, 1) == 0:            # rounds to zero at 0.1 L display resolution
+        return '<span class="gap0">0</span>'
+    cls = "neg" if v > 0 else "pos"       # short of estimate = red; at/over = green
     return f'<span class="{cls}">{fmt.gmv_auto(v)}</span>'
 
 
@@ -153,12 +159,12 @@ def _kpi_block(m: ReportModel) -> str:
     badge = f'<span class="badge {"up" if up else "down"}">{fmt.pct(gr.growth)} vs LM</span>'
     return f"""
     <div class="kpis">
-      <div class="kpi"><div class="lab">MTD GMV</div>
-        <div class="val">{fmt.gmv_auto(gr.gmv_mtd)}</div>
-        <div class="note">{badge}</div></div>
       <div class="kpi"><div class="lab">Run-rate estimate (month)</div>
         <div class="val">{fmt.gmv_auto(gr.estimate)}</div>
         <div class="note">MTD ÷ days elapsed × {m.days_in_month}</div></div>
+      <div class="kpi"><div class="lab">MTD GMV</div>
+        <div class="val">{fmt.gmv_auto(gr.gmv_mtd)}</div>
+        <div class="note">{badge}</div></div>
       <div class="kpi"><div class="lab">Gap to estimate</div>
         <div class="val">{_gap_span(gr.gap)}</div>
         <div class="note">still to come at this pace</div></div>

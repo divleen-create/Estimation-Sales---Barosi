@@ -57,7 +57,10 @@ def money_l(v: Optional[float], dp: int = 1) -> str:
 def pct(g: Optional[float]) -> str:
     if g is None:
         return "–"
-    return f"{g * 100:+.1f}%"
+    v = g * 100
+    if round(v, 1) == 0:        # avoid a signed "-0.0%" / "+0.0%" for near-zero
+        return "0.0%"
+    return f"{v:+.1f}%"
 
 
 def pct_plain(g: Optional[float]) -> str:
