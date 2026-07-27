@@ -281,6 +281,15 @@ older month re-renders every KPI and table and updates the "Compared to <previou
   (`render_html._daily_filter_card`, JS `__showPlat`). Every platform uses the same 7-column schema
   (ad columns show `–` when none); Amazon shows its Core/NOW+Fresh contribution strip.
 
+### Trend chart (year-over-year)
+Between Platform view and Date-wise detail sits a global **Trend** card: an inline-SVG line chart
+(vanilla JS, no libraries) with a **KPI** selector (GMV/Units/Growth/Ad Sales/Estimation/Gap) and a
+**Year** selector. It plots the selected year (blue solid `--tr-cur #12608a`) vs the year before it
+(amber dashed `--tr-prev #d9a441`); the prior year is omitted if absent. Data (`{kpi:{year:[12]}}`
+from each month's `.grand`) is embedded once as `#trendData` JSON; `render_html._TREND_JS` draws it.
+To place one global chart between the two blocks, each month is split into a `_platform_pane` and a
+`_daily_pane` (both `.month-pane`, toggled together by the month dropdown) with the Trend between.
+
 ### Still manual
 - **WhatsApp PNG** — the cloud runner has no browser, so it skips the image
   (`--no-image`). Generate it locally when needed: `python main.py` → `output\index.png`.

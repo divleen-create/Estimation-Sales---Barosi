@@ -6,6 +6,7 @@ no network calls, so the file opens offline and screenshots cleanly.
 from __future__ import annotations
 import datetime as _dt
 import html
+import json
 from pathlib import Path
 
 import config
@@ -21,6 +22,7 @@ CSS = """
   --brand:#0b3d5c; --brand2:#12608a;
   --pos2:#0f9d58; --pos1:#d6f0e0; --pos1t:#0b7a43;
   --neg2:#d93025; --neg1:#fbe0dd; --neg1t:#b1271b; --neu:#f1f4f8;
+  --tr-cur:#12608a; --tr-prev:#d9a441;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
@@ -134,6 +136,23 @@ table.daily{width:100%;table-layout:fixed}
 .consol .ct-meta{font-size:13px;color:var(--muted);text-align:right}
 .consol .ct-meta b{color:var(--ink)}
 @media (max-width:720px){ .consol{align-items:flex-start} .consol .ct-meta{text-align:left} .consol .ct-gmv{font-size:22px} }
+/* trend chart */
+.trend-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.trend-head .name{font-size:16px;font-weight:800;color:var(--brand2)}
+.trend-ctrls{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.trend-ctrls label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-left:6px}
+.trend-ctrls select{font:inherit;font-size:13px;font-weight:700;color:var(--brand);background:var(--card);
+  border:1px solid var(--line);border-radius:8px;padding:5px 10px;cursor:pointer}
+.trend .tr-legend{display:flex;gap:16px;font-size:11px;color:var(--muted);margin:2px 0 8px}
+.trend .tr-legend .lg{display:inline-flex;align-items:center;gap:6px}
+.trend .tr-legend .sw{width:18px;border-top:3px solid var(--tr-cur)}
+.trend .tr-legend .sw.prev{border-top:2px dashed var(--tr-prev)}
+.trend svg{width:100%;height:auto;display:block}
+@media (max-width:720px){ .trend-head{align-items:flex-start} .trend-ctrls label{margin-left:0} }
+.tr-tip{position:fixed;z-index:30;background:var(--card);border:1px solid var(--line);border-radius:8px;
+  box-shadow:0 4px 14px rgba(15,23,42,.14);padding:6px 9px;font-size:11px;color:var(--ink);
+  pointer-events:none;white-space:nowrap}
+.tr-tip b{color:var(--brand2)}
 /* platform filter */
 .platfilter{flex-direction:row;align-items:center;gap:8px}
 .ptbl-pane[hidden]{display:none}
@@ -435,10 +454,11 @@ def _prev_month_label(year: int, month: int) -> str:
     return _dt.date(y, mth, 1).strftime("%B %Y")
 
 
-def _month_pane(m: ReportModel, idx: int, generated: _dt.datetime) -> str:
-    """One month's full content (header + KPIs + notes + platform + daily) as a
-    toggleable pane. idx 0 is visible; the rest start hidden."""
-    dim = m.days_in_month
+def _platform_pane(m: ReportModel, idx: int, generated: _dt.datetime) -> str:
+    """Top pane for a month: header + KPIs + freshness notes + Platform view
+    (summary cards + consolidated total). idx 0 visible; the rest start hidden.
+    The Date-wise detail is a separate pane (_daily_pane) so the global Trend
+    card can sit between the platform and daily blocks."""
     asof = m.as_of.strftime("%d %b %Y") if m.as_of else "–"
     prev = _prev_month_label(m.year, m.month)
     notes = _notes_card(m, generated)
@@ -447,8 +467,6 @@ def _month_pane(m: ReportModel, idx: int, generated: _dt.datetime) -> str:
     platform_block = ('<div class="section-label">Platform view · month-to-date</div>'
                       + "".join(_summary_card(s, total_label) for s in m.sections)
                       + _consolidated_total(m))
-    daily_block = ('<div class="section-label">Date-wise detail</div>'
-                   + _daily_filter_card(m, dim))
     pending = (f'<div class="card" style="border-left:4px solid #b8860b;color:#7a5c00">'
                f'⚠ {_e(m.pending_note)}</div>') if m.pending_note else ""
     present = {s.name for s in m.sections}
@@ -468,8 +486,18 @@ def _month_pane(m: ReportModel, idx: int, generated: _dt.datetime) -> str:
     {_kpi_block(m)}
   </div>
   {notes}{miss_note}{pending}
-  {platform_block}{daily_block}
+  {platform_block}
 </section>"""
+
+
+def _daily_pane(m: ReportModel, idx: int) -> str:
+    """Bottom pane for a month: the platform-filtered Date-wise detail. Shares
+    the month-pane class + data-idx so the month dropdown toggles it in step with
+    the platform pane; the global Trend card sits between the two pane groups."""
+    hidden = "" if idx == 0 else " hidden"
+    daily_block = ('<div class="section-label">Date-wise detail</div>'
+                   + _daily_filter_card(m, m.days_in_month))
+    return f'<section class="month-pane" data-idx="{idx}"{hidden}>{daily_block}</section>'
 
 
 def render(m: ReportModel, generated: _dt.datetime, freshness=None) -> str:
@@ -524,18 +552,141 @@ def write_html(generated: _dt.datetime | None = None, model: ReportModel | None 
     return out
 
 
+# Vanilla-JS trend chart (no libs). Draws two SVG polylines (current year solid
+# blue, last year dashed amber) with axes, dots, legend, headline + hover tooltip.
+_TREND_JS = (
+    "var __MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];"
+    "var __KIND={gmv:'money',units:'count',growth:'pct',ad:'money',estimate:'money',gap:'money'};"
+    "function __fmtT(v,k){if(v==null)return'–';"
+    "if(k=='pct')return(v*100).toFixed(1)+'%';"
+    "if(k=='count')return Math.round(v).toLocaleString('en-IN');"
+    "if(Math.abs(v)>=1e7)return'₹'+(v/1e7).toFixed(2)+' Cr';return'₹'+(v/1e5).toFixed(1)+' L';}"
+    "function __drawTrend(){var el=document.getElementById('trendSvg');if(!el)return;"
+    "var DATA=JSON.parse(document.getElementById('trendData').textContent);"
+    "var plat=document.getElementById('trendPlat').value;"
+    "var kpi=document.getElementById('trendKpi').value,year=document.getElementById('trendYear').value,kind=__KIND[kpi];"
+    "var kd=(DATA[plat]||{})[kpi]||{};var cur=kd[year]||[];var py=(parseInt(year,10)-1)+'';var prev=kd[py]||null;"
+    "var maxYear=Math.max.apply(null,Object.keys(kd).map(Number));"
+    "var vals=[];for(var i=0;i<12;i++){if(cur[i]!=null)vals.push(cur[i]);if(prev&&prev[i]!=null)vals.push(prev[i]);}"
+    "var lo=vals.length?Math.min.apply(null,vals):0,hi=vals.length?Math.max.apply(null,vals):1;"
+    "var yMin=Math.min(0,lo),yMax=hi;if(yMax===yMin){yMax=yMin+1;}"
+    "var span=yMax-yMin,pad=span*0.08;yMax+=pad;if(yMin<0)yMin-=pad;"
+    "var W=760,H=300,pL=58,pR=16,pT=14,pB=30,pw=W-pL-pR,ph=H-pT-pB,baseY=(pT+ph).toFixed(1);"
+    "function X(i){return pL+pw*(i/11);}function Y(v){return pT+ph*(1-(v-yMin)/(yMax-yMin));}"
+    "var lastI=-1;for(var i=0;i<12;i++){if(cur[i]!=null){lastI=i;}}"
+    "var s='<defs><linearGradient id=\"trendGrad\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">'"
+    "+'<stop offset=\"0\" stop-color=\"#12608a\" stop-opacity=\"0.22\"/>'"
+    "+'<stop offset=\"1\" stop-color=\"#12608a\" stop-opacity=\"0\"/></linearGradient></defs>';"
+    "for(var g=0;g<5;g++){var gv=yMin+(yMax-yMin)*g/4,gy=Y(gv);"
+    "s+='<line x1=\"'+pL+'\" y1=\"'+gy.toFixed(1)+'\" x2=\"'+(W-pR)+'\" y2=\"'+gy.toFixed(1)+'\" stroke=\"#e5e9f0\"/>';"
+    "s+='<text x=\"'+(pL-6)+'\" y=\"'+(gy+3).toFixed(1)+'\" text-anchor=\"end\" font-size=\"10\" fill=\"#64748b\">'+__fmtT(gv,kind)+'</text>';}"
+    "for(var i=0;i<12;i++){s+='<text x=\"'+X(i).toFixed(1)+'\" y=\"'+(H-10)+'\" text-anchor=\"middle\" font-size=\"10\" fill=\"#64748b\">'+__MONTHS[i]+'</text>';}"
+    "var ad='',apen=false,firstX=null;for(var i=0;i<12;i++){if(cur[i]!=null){var x=X(i).toFixed(1),y=Y(cur[i]).toFixed(1);"
+    "if(!apen){ad+='M'+x+' '+baseY+' L'+x+' '+y+' ';firstX=x;apen=true;}else{ad+='L'+x+' '+y+' ';}}}"
+    "if(apen){ad+='L'+X(lastI).toFixed(1)+' '+baseY+' Z';s+='<path d=\"'+ad+'\" fill=\"url(#trendGrad)\" stroke=\"none\"/>';}"
+    "function line(arr,color,w,dash){if(!arr)return'';var d='',pen=false,dots='';"
+    "for(var i=0;i<12;i++){if(arr[i]!=null){var x=X(i).toFixed(1),y=Y(arr[i]).toFixed(1);d+=(pen?'L':'M')+x+' '+y+' ';pen=true;"
+    "dots+='<circle cx=\"'+x+'\" cy=\"'+y+'\" r=\"2.6\" fill=\"'+color+'\"/>';}else{pen=false;}}"
+    "var ln=d?'<path d=\"'+d+'\" fill=\"none\" stroke=\"'+color+'\" stroke-width=\"'+w+'\" stroke-linejoin=\"round\" stroke-linecap=\"round\"'+(dash?' stroke-dasharray=\"6 4\"':'')+'/>':'';return ln+dots;}"
+    "if(prev)s+=line(prev,'#d9a441',1.5,true);s+=line(cur,'#12608a',2,false);"
+    "if((+year)===maxYear&&lastI>=0){s+='<circle cx=\"'+X(lastI).toFixed(1)+'\" cy=\"'+Y(cur[lastI]).toFixed(1)+'\" r=\"3.5\" fill=\"#ffffff\" stroke=\"#12608a\" stroke-width=\"2\"/>';}"
+    "el.innerHTML=s;"
+    "var lg='<span class=\"lg\"><span class=\"sw\"></span>'+year+'</span>';if(prev)lg+='<span class=\"lg\"><span class=\"sw prev\"></span>'+py+'</span>';"
+    "document.getElementById('trendLegend').innerHTML=lg;"
+    "var tip=document.getElementById('trendTip');"
+    "el.onmousemove=function(ev){var r=el.getBoundingClientRect();var rel=(ev.clientX-r.left)/r.width*W;"
+    "var i=Math.round((rel-pL)/pw*11);if(i<0)i=0;if(i>11)i=11;var c=cur[i],p=prev?prev[i]:null;"
+    "if(c==null&&p==null){tip.hidden=true;return;}var t='<b>'+__MONTHS[i]+'</b> '+year+': '+__fmtT(c,kind);"
+    "if(prev)t+=' · '+py+': '+__fmtT(p,kind);tip.innerHTML=t;tip.hidden=false;"
+    "tip.style.left=(ev.clientX+12)+'px';tip.style.top=(ev.clientY-10)+'px';};"
+    "el.onmouseleave=function(){document.getElementById('trendTip').hidden=true;};}"
+    "__drawTrend();"
+)
+
+
+# KPI key -> (label, grand-attr). Order = dropdown order.
+_TREND_KPIS = [
+    ("gmv", "GMV", "gmv_mtd"),
+    ("units", "Units", "units_mtd"),
+    ("growth", "Growth", "growth"),
+    ("ad", "Ad Sales", "ad_mtd"),
+    ("estimate", "Estimation", "estimate"),
+    ("gap", "Gap", "gap"),
+]
+
+
+def _trend_dataset(models):
+    """{platform: {kpi: {year(str): [12 monthly values, null]}}} + years + platforms.
+    'All' = grand totals; each daily-cadence channel keyed by its name."""
+    years = sorted({m.year for m in models})
+    order = [n for sec in config.SECTIONS.values() for n in sec["channels"]]
+    seen = {c.name for m in models for s in m.sections for c in s.channels if c.cadence == "daily"}
+    platforms = ["All"] + [n for n in order if n in seen]
+
+    def blank():
+        return {k: {str(y): [None] * 12 for y in years} for k, _, _ in _TREND_KPIS}
+
+    data = {p: blank() for p in platforms}
+    for m in models:
+        yr, mi = str(m.year), m.month - 1
+        for k, _, attr in _TREND_KPIS:
+            data["All"][k][yr][mi] = getattr(m.grand, attr)
+        for s in m.sections:
+            for c in s.channels:
+                if c.name in data:
+                    for k, _, attr in _TREND_KPIS:
+                        data[c.name][k][yr][mi] = getattr(c, attr)
+    return data, years, platforms
+
+
+def _trend_card(models) -> str:
+    """Global YoY trend chart (inline SVG drawn by JS). Own KPI + Year selectors;
+    plots the selected year vs the year before it (omitted when absent)."""
+    data, years, platforms = _trend_dataset(models)
+    if not years:
+        return ""
+    years_desc = sorted(years, reverse=True)
+    plat_opts = "".join(f'<option value="{_e(p)}"{" selected" if p == "All" else ""}>{_e(p)}</option>'
+                        for p in platforms)
+    kpi_opts = "".join(f'<option value="{k}"{" selected" if k == "gmv" else ""}>{_e(lbl)}</option>'
+                       for k, lbl, _ in _TREND_KPIS)
+    year_opts = "".join(f'<option value="{y}"{" selected" if i == 0 else ""}>{y}</option>'
+                        for i, y in enumerate(years_desc))
+    blob = json.dumps(data, separators=(",", ":"))
+    return (
+        '<div class="card trend">'
+        '<div class="trend-head"><div class="name">Trend · year over year</div>'
+        '<div class="trend-ctrls">'
+        '<label for="trendPlat">Platform</label>'
+        f'<select id="trendPlat" onchange="__drawTrend()">{plat_opts}</select>'
+        '<label for="trendKpi">KPI</label>'
+        f'<select id="trendKpi" onchange="__drawTrend()">{kpi_opts}</select>'
+        '<label for="trendYear">Year</label>'
+        f'<select id="trendYear" onchange="__drawTrend()">{year_opts}</select></div></div>'
+        '<div class="tr-legend" id="trendLegend"></div>'
+        '<div class="tw"><svg id="trendSvg" viewBox="0 0 760 300" '
+        'preserveAspectRatio="xMidYMid meet" role="img" aria-label="Monthly trend"></svg></div>'
+        '<div class="grid-note" style="margin-top:6px">Monthly totals across the year for the chosen '
+        'platform; the latest month is month-to-date (hollow point). Current year solid, last year dashed.</div>'
+        f'<script id="trendData" type="application/json">{blob}</script></div>'
+        '<div class="tr-tip" id="trendTip" hidden></div>'
+    )
+
+
 def render_multi(models: "list[ReportModel]", generated: _dt.datetime, freshness=None) -> str:
     """Multi-month page: a Month dropdown swaps between pre-rendered per-month
     panes. models[0] is the current month and is shown by default; the freshness
     footer reflects that current month."""
     if not models:
         return render(build_report(), generated, freshness)
-    opts, panes = [], []
+    opts, plat_panes, day_panes = [], [], []
     for i, m in enumerate(models):
         prev = _prev_month_label(m.year, m.month)
         sel = " selected" if i == 0 else ""
         opts.append(f'<option value="{i}" data-prev="{_e(prev)}"{sel}>{_e(m.month_label)}</option>')
-        panes.append(_month_pane(m, i, generated))
+        plat_panes.append(_platform_pane(m, i, generated))
+        day_panes.append(_daily_pane(m, i))
+    trend = _trend_card(models)
     first_prev = _prev_month_label(models[0].year, models[0].month)
     fresh_note = _freshness_note(freshness)
     foot = (
@@ -556,7 +707,8 @@ def render_multi(models: "list[ReportModel]", generated: _dt.datetime, freshness
               "document.getElementById('cmpMonth').textContent=o.getAttribute('data-prev');}"
               "function __showPlat(sel){var pane=sel.closest('.month-pane');var v=sel.value;"
               "var p=pane.querySelectorAll('.ptbl-pane');"
-              "for(var k=0;k<p.length;k++){p[k].hidden=(p[k].getAttribute('data-plat')!==v);}}</script>")
+              "for(var k=0;k<p.length;k++){p[k].hidden=(p[k].getAttribute('data-plat')!==v);}}"
+              + _TREND_JS + "</script>")
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Daily Sales Report — {_e(models[0].month_label)}</title><style>{CSS}</style></head>
@@ -568,7 +720,9 @@ def render_multi(models: "list[ReportModel]", generated: _dt.datetime, freshness
       {picker}
     </div>
   </div>
-  {''.join(panes)}
+  {''.join(plat_panes)}
+  {trend}
+  {''.join(day_panes)}
   <div class="card foot">{foot}{fresh_note}</div>
   {script}
 </div></body></html>"""
