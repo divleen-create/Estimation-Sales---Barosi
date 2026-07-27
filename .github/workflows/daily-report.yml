@@ -50,9 +50,9 @@ jobs:
 
       - name: Commit and push updated report
         run: |
-          cp output/index.html index.html
+          cp output/index.html index.html   # Pages serves the repo-root index.html
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add index.html output/
+          git add index.html                # output/ is a build artifact, not tracked
           git diff --cached --quiet || git commit -m "Auto-update daily report"
           git push origin HEAD:main

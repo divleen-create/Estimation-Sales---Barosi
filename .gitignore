@@ -1,0 +1,7 @@
+# Build artifacts — regenerated every run, not source of truth.
+# (Pages serves the repo-root index.html, which the workflow still commits.)
+output/
+
+# Python bytecode
+__pycache__/
+*.pyc

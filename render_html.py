@@ -124,6 +124,16 @@ table.daily{width:100%;table-layout:fixed}
 .nchip.ok{background:var(--pos1);color:var(--pos1t);border-color:#bfe3cf}
 .nchip.warn{background:var(--neg1);color:var(--neg1t);border-color:#f3cfca}
 .nchip.mo{background:var(--neu);color:var(--muted)}
+/* consolidated total */
+.consol{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;
+  background:#eef4fb;border:1px solid #d3e3f2}
+.consol .ct-lab{font-size:11px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--brand2)}
+.consol .ct-gmv{font-size:26px;font-weight:800;color:var(--brand);letter-spacing:-.4px;margin-top:3px;
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.consol .ct-gmv .badge{font-size:12px}
+.consol .ct-meta{font-size:13px;color:var(--muted);text-align:right}
+.consol .ct-meta b{color:var(--ink)}
+@media (max-width:720px){ .consol{align-items:flex-start} .consol .ct-meta{text-align:left} .consol .ct-gmv{font-size:22px} }
 /* platform filter */
 .platfilter{flex-direction:row;align-items:center;gap:8px}
 .ptbl-pane[hidden]{display:none}
@@ -174,7 +184,7 @@ def _kpi_block(m: ReportModel) -> str:
     </div>"""
 
 
-def _summary_table(sec: Section) -> str:
+def _summary_table(sec: Section, total_label: str = "Total") -> str:
     rows = []
     for c in sec.channels:
         tag = (f'<span class="tag">of {_e(_PARENT_OF[c.name])}</span>'
@@ -197,7 +207,7 @@ def _summary_table(sec: Section) -> str:
     t = sec.totals
     rows.append(f"""
       <tr class="tot">
-        <td>Total</td>
+        <td>{_e(total_label)}</td>
         <td>{fmt.indian_group(t.units_mtd)}</td>
         <td>{fmt.gmv_auto(t.gmv_mtd)}</td>
         <td>{fmt.gmv_auto(t.lm_mtd)}</td>
@@ -309,9 +319,26 @@ def _section_header(sec: Section) -> str:
             f'<div class="stat">{stat}</div></div>')
 
 
-def _summary_card(sec: Section) -> str:
+def _summary_card(sec: Section, total_label: str = "Total") -> str:
     """Platform-level view for one section (summary table only)."""
-    return f'<div class="card">{_section_header(sec)}{_summary_table(sec)}</div>'
+    return f'<div class="card">{_section_header(sec)}{_summary_table(sec, total_label)}</div>'
+
+
+def _consolidated_total(m: ReportModel) -> str:
+    """Highlighted consolidated total across all sections (Quick Commerce +
+    Marketplace & D2C). Shown only when the month has more than one section."""
+    if len(m.sections) < 2:
+        return ""
+    g = m.grand
+    up = (g.growth or 0) >= 0
+    badge = f'<span class="badge {"up" if up else "down"}">{fmt.pct(g.growth)} vs LM</span>'
+    names = " + ".join(s.name for s in m.sections)
+    return (f'<div class="card consol">'
+            f'<div><div class="ct-lab">Consolidated · {_e(names)}</div>'
+            f'<div class="ct-gmv">{fmt.gmv_auto(g.gmv_mtd)} {badge}</div></div>'
+            f'<div class="ct-meta">LM <b>{fmt.gmv_auto(g.lm_mtd)}</b> · '
+            f'Ad <b>{fmt.gmv_auto(g.ad_mtd)}</b> · '
+            f'Est <b>{fmt.gmv_auto(g.estimate)}</b> · Gap {_gap_span(g.gap)}</div></div>')
 
 
 def _daily_card(sec: Section, dim: int) -> str:
@@ -415,8 +442,11 @@ def _month_pane(m: ReportModel, idx: int, generated: _dt.datetime) -> str:
     asof = m.as_of.strftime("%d %b %Y") if m.as_of else "–"
     prev = _prev_month_label(m.year, m.month)
     notes = _notes_card(m, generated)
+    multi = len(m.sections) > 1
+    total_label = "Sub total" if multi else "Total"
     platform_block = ('<div class="section-label">Platform view · month-to-date</div>'
-                      + "".join(_summary_card(s) for s in m.sections))
+                      + "".join(_summary_card(s, total_label) for s in m.sections)
+                      + _consolidated_total(m))
     daily_block = ('<div class="section-label">Date-wise detail</div>'
                    + _daily_filter_card(m, dim))
     pending = (f'<div class="card" style="border-left:4px solid #b8860b;color:#7a5c00">'

@@ -1,4 +1,4 @@
-QC self-check: 159/159 checks passed (all good)
+QC self-check: 158/158 checks passed (all good)
 
 Estimate freshness (our data-driven run-rate vs Excel's estimate cell):
   [OK] Blinkit: Excel updated & correct — ÷26×31, matches (₹3.81 Cr)
