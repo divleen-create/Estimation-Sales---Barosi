@@ -334,6 +334,12 @@ def _month_pane(m: ReportModel, idx: int) -> str:
                    + "".join(_daily_card(s, dim) for s in m.sections))
     pending = (f'<div class="card" style="border-left:4px solid #b8860b;color:#7a5c00">'
                f'⚠ {_e(m.pending_note)}</div>') if m.pending_note else ""
+    present = {s.name for s in m.sections}
+    missing = [n for n in config.SECTIONS if n not in present]
+    miss_note = (f'<div class="card" style="border-left:4px solid var(--brand2)">'
+                 f'<div class="grid-note" style="margin:0">This month tracks '
+                 f'<b>{_e(" / ".join(present))}</b> only — {_e(" & ".join(missing))} '
+                 f'data begins in a later month.</div></div>') if missing else ""
     hidden = "" if idx == 0 else " hidden"
     return f"""<section class="month-pane" data-idx="{idx}"{hidden}>
   <div class="card">
@@ -344,7 +350,7 @@ def _month_pane(m: ReportModel, idx: int) -> str:
     </div>
     {_kpi_block(m)}
   </div>
-  {pending}
+  {miss_note}{pending}
   {platform_block}{daily_block}
 </section>"""
 

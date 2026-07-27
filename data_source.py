@@ -247,8 +247,8 @@ class Period:
     month: int
     days_in_month: int
     label: str          # e.g. "July 2026"
-    tab_qc: str
-    tab_mkt: str
+    tab_qc: Optional[str]   # may be None for months only one sheet covers
+    tab_mkt: Optional[str]
     pending_note: Optional[str] = None  # e.g. newer month exists but is empty
 
 
@@ -335,33 +335,42 @@ def _sources() -> tuple[Path, Path]:
 
 
 def list_periods() -> list[Period]:
-    """Every month present AND populated in both workbooks, newest first.
+    """Every month present in EITHER workbook (union), newest first, that has
+    data in whichever sheet(s) contain it.
 
-    Same presence/population test resolve_period uses, but returns ALL matches
-    (for the historical month slicer) instead of only the latest. Ignores
-    config.FORCE_PERIOD — that only pins the single 'current' month.
+    A month may live in only one sheet — e.g. the Quick Commerce sheet has
+    history back to 2023 while the Marketplace & D2C sheet starts later. Such a
+    month is included and renders only the section(s) that have data. Ignores
+    config.FORCE_PERIOD (that only pins the single 'current' month).
     """
     qc_path, mkt_path = _sources()
     qc_map, mkt_map = _month_map(qc_path), _month_map(mkt_path)
-    common = sorted(set(qc_map) & set(mkt_map), reverse=True)  # newest first
     out: list[Period] = []
-    for ym in common:
-        if _tab_has_data(qc_path, qc_map[ym]) and _tab_has_data(mkt_path, mkt_map[ym]):
-            y, mth = ym
-            out.append(Period(y, mth, calendar.monthrange(y, mth)[1],
-                              _dt.date(y, mth, 1).strftime("%B %Y"),
-                              qc_map[ym], mkt_map[ym]))
+    for ym in sorted(set(qc_map) | set(mkt_map), reverse=True):  # newest first
+        qtab, mtab = qc_map.get(ym), mkt_map.get(ym)
+        q_ok = bool(qtab) and _tab_has_data(qc_path, qtab)
+        m_ok = bool(mtab) and _tab_has_data(mkt_path, mtab)
+        if not (q_ok or m_ok):
+            continue
+        y, mth = ym
+        out.append(Period(y, mth, calendar.monthrange(y, mth)[1],
+                          _dt.date(y, mth, 1).strftime("%B %Y"),
+                          qtab if q_ok else None, mtab if m_ok else None))
     return out
 
 
 def load_channels(period: "Period | None" = None) -> tuple[list[Channel], Period]:
-    """Return (channels from both workbooks, reporting Period). If `period` is
-    given, load that exact month; else auto-resolve to the latest populated one."""
+    """Return (channels, reporting Period). If `period` is given, load exactly
+    its tabs (either may be absent for single-sheet history months); else
+    auto-resolve to the latest month present in both sheets."""
     qc_src, mkt_src = _sources()
     period = period or resolve_period(qc_src, mkt_src)
-    qc = parse_tab(qc_src, period.tab_qc)
-    mkt = parse_tab(mkt_src, period.tab_mkt)
-    return qc + mkt, period
+    chans: list[Channel] = []
+    if period.tab_qc:
+        chans += parse_tab(qc_src, period.tab_qc)
+    if period.tab_mkt:
+        chans += parse_tab(mkt_src, period.tab_mkt)
+    return chans, period
 
 
 def load_sheet_diagnostics(period: "Period | None" = None) -> dict[str, SheetChannelDiag]:
@@ -370,8 +379,10 @@ def load_sheet_diagnostics(period: "Period | None" = None) -> dict[str, SheetCha
     qc_src, mkt_src = _sources()
     period = period or resolve_period(qc_src, mkt_src)
     out: dict[str, SheetChannelDiag] = {}
-    out.update(sheet_diagnostics(qc_src, period.tab_qc))
-    out.update(sheet_diagnostics(mkt_src, period.tab_mkt))
+    if period.tab_qc:
+        out.update(sheet_diagnostics(qc_src, period.tab_qc))
+    if period.tab_mkt:
+        out.update(sheet_diagnostics(mkt_src, period.tab_mkt))
     return out
 
 

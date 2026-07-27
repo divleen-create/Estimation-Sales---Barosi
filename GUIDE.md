@@ -256,15 +256,20 @@ never blocks.)
 
 ### Month slicer (history)
 The report has a **Month dropdown** (top-right). It defaults to the current month; picking an
-older month re-renders every KPI and table for that month and updates the "Compared to <previous
-month>" caption. The comparison baseline is each tab's own **LM (last-month) column**, so any month
-compares to the calendar month before it. All months present+populated in both sheets are shown.
-- Data: `data_source.list_periods()` enumerates the months; `build_report(period)` builds each;
-  `render_html.render_multi()` embeds one hidden pane per month toggled by a tiny inline script.
-- The **current month is the only one QC/`--strict` gates**; historical months build best-effort
-  (a malformed old tab is skipped with a `SKIP history …` log, never breaks the publish).
-- Cloud history depends on `gsheets.fetch_snapshots()` pulling **all** month tabs (the old 4-tab
-  cap was removed). More months = a bigger `index.html` (~45 KB/month) — acceptable for a static page.
+older month re-renders every KPI and table and updates the "Compared to <previous month>" caption.
+- **Range:** `data_source.list_periods()` returns the **union** of months across both sheets,
+  newest first (back to July 2023). A month present in only one sheet (Quick Commerce history
+  predates the Marketplace & D2C sheet) renders only the section(s) that have data, with a note.
+- **Comparison:** the current month uses the sheet's own **LM column** (QC ground truth). Older
+  months' LM column is blank, so `transform.link_previous()` fills each month's baseline from the
+  **actual previous month's data** we already built — so month-over-month growth works all the way
+  back (earliest month shows "–", nothing before it). Current month is never altered by linking.
+- **Build:** `build_report(period)` builds each month; the **current month is the only one QC/
+  `--strict` gates**; historical months are best-effort (`SKIP history …` on a bad tab, never
+  breaks the publish). `render_html.render_multi()` embeds one hidden pane per month + a tiny
+  toggle script.
+- **Cloud:** `gsheets.fetch_snapshots()` now pulls **all** month tabs (old 4-tab cap removed).
+  ~37 months ≈ 1.3 MB `index.html` — fine for a static page (gzips small over the wire).
 
 ### Still manual
 - **WhatsApp PNG** — the cloud runner has no browser, so it skips the image

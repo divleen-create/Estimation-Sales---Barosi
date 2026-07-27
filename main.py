@@ -19,7 +19,7 @@ except Exception:
 
 import config
 import qc
-from transform import build_report
+from transform import build_report, link_previous
 from data_source import load_sheet_diagnostics, list_periods
 from render_html import write_html_multi
 from render_image import html_to_png
@@ -56,6 +56,9 @@ def main() -> None:
             models.append(build_report(p))
         except Exception as e:  # noqa: BLE001 — historical month is non-critical
             print(f"SKIP history {p.label}: {e}")
+    # Fill month-over-month comparison for older months whose in-tab LM column is
+    # blank, using the actual prior month's data (leaves the current month as-is).
+    link_previous(models)
     print(f"MONTHS: {', '.join(m.month_label for m in models)}")
 
     # 1) build/update the HTML (current month is the default pane)

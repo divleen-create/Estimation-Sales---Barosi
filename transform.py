@@ -162,7 +162,10 @@ def build_report(period=None) -> ReportModel:
         return Section(name=name, channels=chans, totals=_totals(chans),
                        dates=daily_dates, last_date=last)
 
-    sections = [section("Quick Commerce", qc), section("Marketplace & D2C", mkt)]
+    # Drop a section with no channels (e.g. older months that predate the
+    # Marketplace & D2C sheet show only Quick Commerce).
+    sections = [s for s in (section("Quick Commerce", qc),
+                            section("Marketplace & D2C", mkt)) if s.channels]
     grand = _totals(summaries)
 
     ranked = [c for c in summaries if c.growth is not None]
@@ -177,6 +180,49 @@ def build_report(period=None) -> ReportModel:
         worst_channel=worst.name if worst else None,
         pending_note=period.pending_note,
     )
+
+
+def _prev_ym(year: int, month: int) -> tuple[int, int]:
+    return (year - 1, 12) if month == 1 else (year, month - 1)
+
+
+def link_previous(models: list[ReportModel]) -> None:
+    """Fill month-over-month comparison (LM) for months whose in-tab LM column is
+    empty, using the ACTUAL previous month's data (we build every month, so the
+    prior month's GMV is available). Mutates the models in place.
+
+    Months that already carry an in-tab LM total (e.g. the current month, whose
+    figures QC validates against the sheet) are left untouched — the guard below
+    only links months whose LM is effectively zero.
+    """
+    by_ym = {(m.year, m.month): m for m in models}
+    for m in models:
+        if (m.grand.lm_mtd or 0) > 1:          # already has in-tab LM -> keep as-is
+            continue
+        prev = by_ym.get(_prev_ym(m.year, m.month))
+        if not prev:                           # earliest month -> no baseline
+            continue
+        prev_ch = {c.name: c for s in prev.sections for c in s.channels}
+        prev_day = {(c.name, d.date.day): d.gmv
+                    for s in prev.sections for c in s.channels
+                    for d in c.daily if d.gmv is not None}
+        for s in m.sections:
+            for c in s.channels:
+                pc = prev_ch.get(c.name)
+                if pc is not None:
+                    c.lm_mtd = pc.gmv_mtd
+                    c.growth = _safe_growth(c.gmv_mtd, c.lm_mtd)
+                for cell in c.daily:
+                    pv = prev_day.get((c.name, cell.date.day))
+                    if pv is not None:
+                        cell.lm_gmv = pv
+                        cell.growth = (_safe_growth(cell.gmv, pv)
+                                       if (cell.gmv is not None and pv) else None)
+            s.totals = _totals(s.channels)
+        m.grand = _totals([c for s in m.sections for c in s.channels])
+        ranked = [c for s in m.sections for c in s.channels if c.growth is not None]
+        m.best_channel = max(ranked, key=lambda c: c.growth).name if ranked else None
+        m.worst_channel = min(ranked, key=lambda c: c.growth).name if ranked else None
 
 
 if __name__ == "__main__":
