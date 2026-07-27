@@ -192,3 +192,80 @@ different setup). The scheduled task leaves `output\index.png` ready to forward.
 | Run only the QC check | `python qc.py` |
 | Inspect parsed data / resolved month | `python data_source.py` |
 | Pull live Sheets (read-only) | `python -c "import gsheets; gsheets.fetch_snapshots()"` |
+
+---
+
+## 8. Cloud automation — the live web report (current production setup)
+
+The daily **web** report is fully automated in the cloud and needs **no PC on**.
+Windows Task Scheduler (§5b) is now only for generating the **WhatsApp PNG** locally.
+
+**The flow (runs every day, hands-off):**
+```
+cron-job.org  ──11:30 IST──▶  GitHub API (workflow_dispatch)
+                                     │
+                                     ▼
+   GitHub Actions runs daily-report.yml:
+     live Sheets pull (required) → python main.py --no-image --strict
+     → commit index.html + output/ → push → GitHub Pages redeploys
+                                     │
+                                     ▼
+   Report live at: https://divleen-create.github.io/Estimation-Sales---Barosi/
+```
+
+### The pieces
+- **Repo:** `github.com/divleen-create/Estimation-Sales---Barosi` — code, snapshots,
+  and workflow all at the **root** of the `main` branch. Published via GitHub Pages.
+- **Local ↔ remote:** this `report_tool/` folder is a git repo on branch `master`
+  that pushes to `main` (`git push origin master:main`). The Actions bot commits
+  "Auto-update daily report" to `main` on every run — so your local is always a
+  step behind. **Always `git pull --rebase origin main` before you push.**
+- **Trigger:** **cron-job.org** is the *sole* trigger (fires punctually at 11:30 IST
+  via the `workflow_dispatch` API). GitHub's own `schedule:` cron was removed on
+  purpose — it fired hours late and caused surprise mid-day re-publishes.
+- **Live data:** the service-account JSON is stored as the GitHub repo secret
+  **`GCP_SERVICE_ACCOUNT_KEY`**. The SA email must stay shared as **Viewer** on both
+  Sheets and the **Sheets API** enabled. Pull is a **required** step — a bad key
+  fails the run loudly instead of publishing stale data.
+- **Trigger token:** fine-grained PAT `barosi-sales-cron-job-trigger`, scoped to this
+  repo only, Actions: Read+write, stored in the cron-job.org job's `Authorization:
+  Bearer …` header. **⚠ Expires 2027-07-24** — regenerate then (GitHub → Settings →
+  Developer settings → Fine-grained tokens) and paste the new value into cron-job.org,
+  or the daily trigger stops.
+
+### Data-integrity guarantee
+The build runs `--strict`: if the numbers don't reconcile against the sheet's own
+Total row (QC layers A/B/C), the run **fails and does not publish** — the last good
+report stays up and GitHub emails you the failure. So a *published* report has always
+reconciled with the sheet. (The estimate-freshness/day-count check stays advisory and
+never blocks.)
+
+### Common tasks
+- **Change the daily time:** edit the schedule in the **cron-job.org** job (time is in
+  UTC there; 06:00 UTC = 11:30 IST). Don't add a GitHub `schedule:` back — it's unreliable.
+- **Trigger a run now:** cron-job.org → your job → **Test run** (expect HTTP **204**),
+  or GitHub → Actions → Daily Sales Report → **Run workflow**.
+- **Edit the tool code:** change files here → `git pull --rebase origin main` →
+  `git add … && git commit -m "…"` → `git push origin master:main`.
+- **Page looks stale after a run:** GitHub Pages CDN cache — hard-refresh with
+  **Ctrl+Shift+R**. ("Data as of" = latest date *in the sheet*; it only moves when the
+  sheet gets a new day. "Generated … IST" = when the report was built.)
+- **A run is red (failed):** open Actions → the run → the failed step. Usual causes:
+  live-pull key/JSON problem, SA not shared on a sheet, or `--strict` caught a
+  data mismatch — check the sheet before trusting numbers.
+
+### Month slicer (history)
+The report has a **Month dropdown** (top-right). It defaults to the current month; picking an
+older month re-renders every KPI and table for that month and updates the "Compared to <previous
+month>" caption. The comparison baseline is each tab's own **LM (last-month) column**, so any month
+compares to the calendar month before it. All months present+populated in both sheets are shown.
+- Data: `data_source.list_periods()` enumerates the months; `build_report(period)` builds each;
+  `render_html.render_multi()` embeds one hidden pane per month toggled by a tiny inline script.
+- The **current month is the only one QC/`--strict` gates**; historical months build best-effort
+  (a malformed old tab is skipped with a `SKIP history …` log, never breaks the publish).
+- Cloud history depends on `gsheets.fetch_snapshots()` pulling **all** month tabs (the old 4-tab
+  cap was removed). More months = a bigger `index.html` (~45 KB/month) — acceptable for a static page.
+
+### Still manual
+- **WhatsApp PNG** — the cloud runner has no browser, so it skips the image
+  (`--no-image`). Generate it locally when needed: `python main.py` → `output\index.png`.

@@ -71,6 +71,8 @@ class Section:
 @dataclass
 class ReportModel:
     month_label: str
+    year: int
+    month: int
     days_in_month: int
     as_of: Optional[_dt.date]
     sections: list[Section]
@@ -134,8 +136,8 @@ def _totals(channels: list[ChannelSummary]) -> Totals:
     )
 
 
-def build_report() -> ReportModel:
-    chans, period = load_channels()
+def build_report(period=None) -> ReportModel:
+    chans, period = load_channels(period)
     channels = {c.name: c for c in chans}
     dim = period.days_in_month
     summaries: list[ChannelSummary] = []
@@ -169,7 +171,7 @@ def build_report() -> ReportModel:
     as_of = max((s.last_date for s in sections if s.last_date), default=None)
 
     return ReportModel(
-        month_label=period.label,
+        month_label=period.label, year=period.year, month=period.month,
         days_in_month=period.days_in_month, as_of=as_of, sections=sections,
         grand=grand, best_channel=best.name if best else None,
         worst_channel=worst.name if worst else None,

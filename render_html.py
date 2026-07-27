@@ -108,6 +108,16 @@ table.daily{width:100%;table-layout:fixed}
   .ptitle{font-size:12px}
 }
 @media (max-width:420px){ .kpis{grid-template-columns:1fr} }
+/* month slicer */
+.picker{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+.picker label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+.picker select{font:inherit;font-size:14px;font-weight:700;color:var(--brand);background:var(--card);
+  border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer}
+.cmp{color:var(--muted);font-size:11px}
+.cmp b{color:var(--brand2)}
+.mtitle{font-size:16px;font-weight:800;color:var(--brand2);letter-spacing:-.2px}
+.month-pane[hidden]{display:none}
+@media (max-width:720px){ .picker{align-items:flex-start;width:100%} }
 """
 
 
@@ -306,6 +316,39 @@ def _freshness_note(freshness) -> str:
             'source sheet.</div>')
 
 
+def _prev_month_label(year: int, month: int) -> str:
+    """Calendar month before (year, month), e.g. (2025, 7) -> 'June 2025'."""
+    y, mth = (year - 1, 12) if month == 1 else (year, month - 1)
+    return _dt.date(y, mth, 1).strftime("%B %Y")
+
+
+def _month_pane(m: ReportModel, idx: int) -> str:
+    """One month's full content (header + KPIs + platform + daily blocks) as a
+    toggleable pane. idx 0 is visible; the rest start hidden."""
+    dim = m.days_in_month
+    asof = m.as_of.strftime("%d %b %Y") if m.as_of else "–"
+    prev = _prev_month_label(m.year, m.month)
+    platform_block = ('<div class="section-label">Platform view · month-to-date</div>'
+                      + "".join(_summary_card(s) for s in m.sections))
+    daily_block = ('<div class="section-label">Date-wise detail</div>'
+                   + "".join(_daily_card(s, dim) for s in m.sections))
+    pending = (f'<div class="card" style="border-left:4px solid #b8860b;color:#7a5c00">'
+               f'⚠ {_e(m.pending_note)}</div>') if m.pending_note else ""
+    hidden = "" if idx == 0 else " hidden"
+    return f"""<section class="month-pane" data-idx="{idx}"{hidden}>
+  <div class="card">
+    <div class="head">
+      <div><div class="mtitle">{_e(m.month_label)}</div>
+        <div class="sub">month-to-date · compared to {_e(prev)}</div></div>
+      <div class="asof">Data as of <b>{asof}</b></div>
+    </div>
+    {_kpi_block(m)}
+  </div>
+  {pending}
+  {platform_block}{daily_block}
+</section>"""
+
+
 def render(m: ReportModel, generated: _dt.datetime, freshness=None) -> str:
     asof = m.as_of.strftime("%d %b %Y") if m.as_of else "–"
     dim = m.days_in_month
@@ -355,6 +398,63 @@ def write_html(generated: _dt.datetime | None = None, model: ReportModel | None 
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out = config.OUTPUT_DIR / "index.html"   # single fixed location, overwritten each run
     out.write_text(render(m, generated, freshness), encoding="utf-8")
+    return out
+
+
+def render_multi(models: "list[ReportModel]", generated: _dt.datetime, freshness=None) -> str:
+    """Multi-month page: a Month dropdown swaps between pre-rendered per-month
+    panes. models[0] is the current month and is shown by default; the freshness
+    footer reflects that current month."""
+    if not models:
+        return render(build_report(), generated, freshness)
+    opts, panes = [], []
+    for i, m in enumerate(models):
+        prev = _prev_month_label(m.year, m.month)
+        sel = " selected" if i == 0 else ""
+        opts.append(f'<option value="{i}" data-prev="{_e(prev)}"{sel}>{_e(m.month_label)}</option>')
+        panes.append(_month_pane(m, i))
+    first_prev = _prev_month_label(models[0].year, models[0].month)
+    fresh_note = _freshness_note(freshness)
+    foot = (
+        "<b>Run-rate estimate</b> = MTD GMV ÷ days elapsed × days in month (the team's own "
+        "method). <b>Growth</b> compares like-for-like same dates vs last month (LM GMV). "
+        "<b>Ad Contri</b> = Ad Sales ÷ current GMV. "
+        "<b>Amazon</b> GMV (and Blinkit ad spend) arrive on a T-2 lag, so the latest 1–2 days are "
+        "pending, not a drop. <b>Amazon Core, NOW+Fresh, Flipkart, Minutes, First Club</b> are "
+        "reviewed monthly, shown as MTD totals (no daily split). <b>Shopify</b> is D2C: GMV = gross "
+        "sales. Figures read from a read-only snapshot of the source sheets; no data is altered or invented."
+    )
+    picker = (f'<div class="picker"><label for="monthPicker">Month</label>'
+              f'<select id="monthPicker" onchange="__showMonth(this.value)">{"".join(opts)}</select>'
+              f'<div class="cmp">Compared to <b><span id="cmpMonth">{_e(first_prev)}</span></b></div></div>')
+    script = ("<script>function __showMonth(v){var s=document.getElementById('monthPicker');"
+              "var o=s.options[s.selectedIndex];var p=document.querySelectorAll('.month-pane');"
+              "for(var k=0;k<p.length;k++){p[k].hidden=(p[k].getAttribute('data-idx')!==v);}"
+              "document.getElementById('cmpMonth').textContent=o.getAttribute('data-prev');}</script>")
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily Sales Report — {_e(models[0].month_label)}</title><style>{CSS}</style></head>
+<body><div class="wrap">
+  <div class="card">
+    <div class="head">
+      <div><div class="title">Daily Sales Report</div>
+        <div class="sub">Generated {generated.strftime('%d %b %Y, %H:%M')} IST</div></div>
+      {picker}
+    </div>
+  </div>
+  {''.join(panes)}
+  <div class="card foot">{foot}{fresh_note}</div>
+  {script}
+</div></body></html>"""
+
+
+def write_html_multi(models: "list[ReportModel]", generated: _dt.datetime | None = None,
+                     freshness=None) -> Path:
+    """Write the multi-month report to the single fixed output/index.html."""
+    generated = generated or _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=5, minutes=30)))
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = config.OUTPUT_DIR / "index.html"
+    out.write_text(render_multi(models, generated, freshness), encoding="utf-8")
     return out
 
 

@@ -20,8 +20,8 @@ except Exception:
 import config
 import qc
 from transform import build_report
-from data_source import load_sheet_diagnostics
-from render_html import write_html
+from data_source import load_sheet_diagnostics, list_periods
+from render_html import write_html_multi
 from render_image import html_to_png
 import fmt
 
@@ -37,15 +37,29 @@ def main() -> None:
     # this runs — the GitHub runner's clock is UTC.
     IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
     generated = _dt.datetime.now(IST)
-    # Build the model + sheet diagnostics ONCE and thread them through render + QC.
+    # Build the CURRENT month once (honors FORCE_PERIOD) — this is the month QC
+    # gates and leadership acts on. Thread its model/diags through render + QC.
     model = build_report()
     diags = load_sheet_diagnostics()
     freshness = qc.compute_freshness(model, diags)
     if model.pending_note:
         print(f"NOTE : {model.pending_note}")
 
-    # 1) build/update the HTML
-    html_path = write_html(generated, model=model, freshness=freshness)
+    # Build every OTHER available month (best-effort) for the history slicer.
+    # A malformed old tab must never break the daily publish — skip and log it.
+    cur_ym = (model.year, model.month)
+    models = [model]
+    for p in list_periods():
+        if (p.year, p.month) == cur_ym:
+            continue
+        try:
+            models.append(build_report(p))
+        except Exception as e:  # noqa: BLE001 — historical month is non-critical
+            print(f"SKIP history {p.label}: {e}")
+    print(f"MONTHS: {', '.join(m.month_label for m in models)}")
+
+    # 1) build/update the HTML (current month is the default pane)
+    html_path = write_html_multi(models, generated, freshness=freshness)
     print(f"HTML : {html_path}")
 
     # 2) QC self-check: sheet→model, identities, model→html (+ estimate audit)

@@ -334,20 +334,41 @@ def _sources() -> tuple[Path, Path]:
     return config.WORKBOOK_QC, config.WORKBOOK_MKT
 
 
-def load_channels() -> tuple[list[Channel], Period]:
-    """Return (channels from both workbooks, resolved reporting Period)."""
+def list_periods() -> list[Period]:
+    """Every month present AND populated in both workbooks, newest first.
+
+    Same presence/population test resolve_period uses, but returns ALL matches
+    (for the historical month slicer) instead of only the latest. Ignores
+    config.FORCE_PERIOD — that only pins the single 'current' month.
+    """
+    qc_path, mkt_path = _sources()
+    qc_map, mkt_map = _month_map(qc_path), _month_map(mkt_path)
+    common = sorted(set(qc_map) & set(mkt_map), reverse=True)  # newest first
+    out: list[Period] = []
+    for ym in common:
+        if _tab_has_data(qc_path, qc_map[ym]) and _tab_has_data(mkt_path, mkt_map[ym]):
+            y, mth = ym
+            out.append(Period(y, mth, calendar.monthrange(y, mth)[1],
+                              _dt.date(y, mth, 1).strftime("%B %Y"),
+                              qc_map[ym], mkt_map[ym]))
+    return out
+
+
+def load_channels(period: "Period | None" = None) -> tuple[list[Channel], Period]:
+    """Return (channels from both workbooks, reporting Period). If `period` is
+    given, load that exact month; else auto-resolve to the latest populated one."""
     qc_src, mkt_src = _sources()
-    period = resolve_period(qc_src, mkt_src)
+    period = period or resolve_period(qc_src, mkt_src)
     qc = parse_tab(qc_src, period.tab_qc)
     mkt = parse_tab(mkt_src, period.tab_mkt)
     return qc + mkt, period
 
 
-def load_sheet_diagnostics() -> dict[str, SheetChannelDiag]:
+def load_sheet_diagnostics(period: "Period | None" = None) -> dict[str, SheetChannelDiag]:
     """Sheet Total-row values + estimate formulas for every channel, for the
-    resolved period. Used by QC as ground truth."""
+    given period (or the resolved latest). Used by QC as ground truth."""
     qc_src, mkt_src = _sources()
-    period = resolve_period(qc_src, mkt_src)
+    period = period or resolve_period(qc_src, mkt_src)
     out: dict[str, SheetChannelDiag] = {}
     out.update(sheet_diagnostics(qc_src, period.tab_qc))
     out.update(sheet_diagnostics(mkt_src, period.tab_mkt))

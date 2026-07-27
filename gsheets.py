@@ -40,7 +40,6 @@ _SHEETS = {
     config.GSHEET_QC_ID: SNAPSHOT_DIR / "qc_snapshot.xlsx",
     config.GSHEET_MKT_ID: SNAPSHOT_DIR / "mkt_snapshot.xlsx",
 }
-_RECENT_TABS = 4          # how many recent month tabs to snapshot per workbook
 _EXCEL_EPOCH = _dt.datetime(1899, 12, 30)
 
 
@@ -79,15 +78,16 @@ def _write_snapshot(dest: Path, tabs: list[tuple[str, list[list]]]) -> None:
 
 
 def fetch_snapshots() -> dict[str, Path]:
-    """Pull the recent month tabs of both sheets (read-only) into local .xlsx
-    snapshots. Returns {sheet_id: snapshot_path}."""
+    """Pull ALL month tabs of both sheets (read-only) into local .xlsx
+    snapshots. Returns {sheet_id: snapshot_path}. All months are snapshotted so
+    the report's month slicer can show full history in the cloud build."""
     svc = _service()
     for sheet_id, dest in _SHEETS.items():
         meta = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
         titles = [s["properties"]["title"] for s in meta["sheets"]]
         months = sorted(((parse_period_from_name(t), t) for t in titles),
                         key=lambda x: (x[0] or (0, 0)), reverse=True)
-        month_titles = [t for ym, t in months if ym][:_RECENT_TABS]
+        month_titles = [t for ym, t in months if ym]   # every month tab, newest first
         tabs = []
         for t in month_titles:
             resp = svc.spreadsheets().values().get(
