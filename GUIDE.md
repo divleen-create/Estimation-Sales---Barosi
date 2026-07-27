@@ -271,6 +271,16 @@ older month re-renders every KPI and table and updates the "Compared to <previou
 - **Cloud:** `gsheets.fetch_snapshots()` now pulls **all** month tabs (old 4-tab cap removed).
   ~37 months ≈ 1.3 MB `index.html` — fine for a static page (gzips small over the wire).
 
+### Report UX (in each month pane)
+- **Data notes · freshness** card (under the KPIs): per-platform latest data date, flagging any
+  behind its expected lag (`config.FRESHNESS_LAG_DAYS`: T-1 default, Amazon T-2; `MONTHLY_PLATFORMS`
+  = Flipkart, never flagged). Reference is "today" for the current month, month-end for past months
+  — so it changes with the month picker. Built by `render_html._notes_card`.
+- **Gap to estimate** is green (+ve) / red (−ve) everywhere via `render_html._gap_span`.
+- **Date-wise detail** is one table + a **platform dropdown** spanning both sections
+  (`render_html._daily_filter_card`, JS `__showPlat`). Every platform uses the same 7-column schema
+  (ad columns show `–` when none); Amazon shows its Core/NOW+Fresh contribution strip.
+
 ### Still manual
 - **WhatsApp PNG** — the cloud runner has no browser, so it skips the image
   (`--no-image`). Generate it locally when needed: `python main.py` → `output\index.png`.

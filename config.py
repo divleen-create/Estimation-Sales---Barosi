@@ -97,5 +97,12 @@ LAG_DAYS = {"Amazon": 2}
 # ad-spend column is handled correctly if/when it is surfaced in the report.
 AD_LAG_DAYS = {"Amazon": 2, "Blinkit": 2}
 
+# --- Data-freshness note ----------------------------------------------------
+# Expected data lag per platform (days behind the reference date) for the
+# freshness note. Anything staler than this is flagged as behind/missing.
+FRESHNESS_LAG_DAYS = {"_default": 1, "Amazon": 2}
+# Platforms reviewed monthly — never flagged for missing daily data.
+MONTHLY_PLATFORMS = {"Flipkart"}
+
 # --- Output -----------------------------------------------------------------
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"

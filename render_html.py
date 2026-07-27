@@ -117,7 +117,16 @@ table.daily{width:100%;table-layout:fixed}
 .cmp b{color:var(--brand2)}
 .mtitle{font-size:16px;font-weight:800;color:var(--brand2);letter-spacing:-.2px}
 .month-pane[hidden]{display:none}
-@media (max-width:720px){ .picker{align-items:flex-start;width:100%} }
+/* data-freshness notes */
+.notes .nrow{display:flex;flex-wrap:wrap;gap:6px}
+.nchip{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
+.nchip.ok{background:var(--pos1);color:var(--pos1t);border-color:#bfe3cf}
+.nchip.warn{background:var(--neg1);color:var(--neg1t);border-color:#f3cfca}
+.nchip.mo{background:var(--neu);color:var(--muted)}
+/* platform filter */
+.platfilter{flex-direction:row;align-items:center;gap:8px}
+.ptbl-pane[hidden]{display:none}
+@media (max-width:720px){ .picker{align-items:flex-start;width:100%} .platfilter{flex-direction:row;width:auto} }
 """
 
 
@@ -128,6 +137,14 @@ def _e(s) -> str:
 def _growth_span(g):
     cls = "pos" if (g or 0) > 0 else ("neg" if (g or 0) < 0 else "na")
     return f'<span class="{cls}">{fmt.pct(g)}</span>'
+
+
+def _gap_span(v):
+    """Gap to estimate, coloured green (+ve) / red (-ve)."""
+    if v is None:
+        return '<span class="na">–</span>'
+    cls = "pos" if v > 0 else ("neg" if v < 0 else "na")
+    return f'<span class="{cls}">{fmt.gmv_auto(v)}</span>'
 
 
 def _kpi_block(m: ReportModel) -> str:
@@ -143,7 +160,7 @@ def _kpi_block(m: ReportModel) -> str:
         <div class="val">{fmt.gmv_auto(gr.estimate)}</div>
         <div class="note">MTD ÷ days elapsed × {m.days_in_month}</div></div>
       <div class="kpi"><div class="lab">Gap to estimate</div>
-        <div class="val">{fmt.gmv_auto(gr.gap)}</div>
+        <div class="val">{_gap_span(gr.gap)}</div>
         <div class="note">still to come at this pace</div></div>
       <div class="kpi"><div class="lab">Momentum</div>
         <div class="val" style="font-size:15px">▲ {_e(m.best_channel)}</div>
@@ -168,7 +185,7 @@ def _summary_table(sec: Section) -> str:
         <td>{ad}</td>
         <td>{adc}</td>
         <td>{fmt.gmv_auto(c.estimate)}</td>
-        <td>{fmt.gmv_auto(c.gap)}</td>
+        <td>{_gap_span(c.gap)}</td>
         <td class="na">{c.last_date.strftime('%d %b') if c.last_date else '–'}</td>
       </tr>""")
     t = sec.totals
@@ -182,7 +199,7 @@ def _summary_table(sec: Section) -> str:
         <td>{fmt.gmv_auto(t.ad_mtd)}</td>
         <td>{fmt.pct_plain(t.ad_contri)}</td>
         <td>{fmt.gmv_auto(t.estimate)}</td>
-        <td>{fmt.gmv_auto(t.gap)}</td>
+        <td>{_gap_span(t.gap)}</td>
         <td></td>
       </tr>""")
     return f"""
@@ -196,21 +213,22 @@ def _summary_table(sec: Section) -> str:
 
 
 def _platform_daily_table(c: ChannelSummary, dim: int) -> str:
-    """Full day-wise KPI table for one platform: Date | Units | GMV | LM GMV |
-    [Ad Sales] | Growth, with Total and run-rate Estimate rows. Money carries ₹,
-    units carry the count; the GMV cell is shaded by that day's growth vs LM."""
+    """Full day-wise KPI table for one platform. Uniform 7-column schema for
+    EVERY platform — Date | Units | GMV | GMV·LM | Growth | Ad Sales | Ad Contri
+    — so the platform filter swaps tables seamlessly; platforms with no ad data
+    show '–' in the ad columns. The GMV cell is shaded by that day's growth vs LM."""
     cells = [x for x in c.daily
              if any(v is not None for v in (x.gmv, x.lm_gmv, x.ad_spend, x.units))]
     if not cells:
         return ""
     latest = c.last_date
-    ncols = 5 + (2 if c.has_ad else 0)  # total columns in the table
+    na = '<span class="na">–</span>'
 
     body = []
     for x in cells:
         gcls = fmt.growth_class(x.growth)
         ad_td = (f"<td>{fmt.money_l(x.ad_spend)}</td><td>{fmt.pct_plain(x.ad_contri)}</td>"
-                 if c.has_ad else "")
+                 if c.has_ad else f"<td>{na}</td><td>{na}</td>")
         datecls = ' class="latest"' if x.date == latest else ''
         body.append(
             f'<tr><td{datecls}>{x.date.strftime("%d %b")}</td>'
@@ -221,7 +239,7 @@ def _platform_daily_table(c: ChannelSummary, dim: int) -> str:
             f'{ad_td}</tr>')
 
     ad_tot = (f"<td>{fmt.gmv_auto(c.ad_mtd)}</td><td>{fmt.pct_plain(c.ad_contri)}</td>"
-              if c.has_ad else "")
+              if c.has_ad else f"<td>{na}</td><td>{na}</td>")
     total_row = (f'<tr class="tot"><td>Total</td>'
                  f'<td>{fmt.indian_group(c.units_mtd)}</td>'
                  f'<td>{fmt.gmv_auto(c.gmv_mtd)}</td>'
@@ -229,16 +247,15 @@ def _platform_daily_table(c: ChannelSummary, dim: int) -> str:
                  f'<td>{_growth_span(c.growth)}</td>{ad_tot}</tr>')
     div = latest.day if latest else 0
     est_row = (f'<tr class="est"><td>Est · month</td>'
-               f'<td>{fmt.gmv_auto(c.estimate)}</td><td colspan="{ncols - 2}"></td></tr>')
+               f'<td>{fmt.gmv_auto(c.estimate)}</td><td colspan="5"></td></tr>')
 
-    ad_h = "<th>Ad Sales</th><th>Ad Contri</th>" if c.has_ad else ""
     asof = latest.strftime("%d %b") if latest else "–"
     return f"""
     <div class="ptbl">
       <div class="ptitle">{_e(c.name)} <span class="pmeta">daily · data to {asof}
         · estimate ÷{div}×{dim}</span></div>
       <div class="tw"><table class="daily">
-        <thead><tr><th>Date</th><th>Units</th><th>GMV</th><th>GMV · LM</th><th>Growth</th>{ad_h}</tr></thead>
+        <thead><tr><th>Date</th><th>Units</th><th>GMV</th><th>GMV · LM</th><th>Growth</th><th>Ad Sales</th><th>Ad Contri</th></tr></thead>
         <tbody>{''.join(body)}{total_row}{est_row}</tbody>
       </table></div>
     </div>"""
@@ -281,7 +298,7 @@ def _section_header(sec: Section) -> str:
     stat = (f'GMV <b>{fmt.gmv_auto(t.gmv_mtd)}</b> · '
             f'<span class="{"pos" if up else "neg"}">{fmt.pct(t.growth)}</span> vs LM · '
             f'Ad <b>{fmt.gmv_auto(t.ad_mtd)}</b> · '
-            f'Est <b>{fmt.gmv_auto(t.estimate)}</b> · Gap <b>{fmt.gmv_auto(t.gap)}</b>')
+            f'Est <b>{fmt.gmv_auto(t.estimate)}</b> · Gap {_gap_span(t.gap)}')
     return (f'<div class="sec-h"><div class="name">{_e(sec.name)}</div>'
             f'<div class="stat">{stat}</div></div>')
 
@@ -316,22 +333,86 @@ def _freshness_note(freshness) -> str:
             'source sheet.</div>')
 
 
+def _notes_card(m: ReportModel, generated: _dt.datetime) -> str:
+    """Data-freshness note: each platform's latest data date, flagging any that
+    are behind their expected lag (T-1 default, Amazon T-2, Flipkart monthly).
+    Reference is 'today' (generated) for the current month, else the month end."""
+    chans = [c for s in m.sections for c in s.channels if c.cadence == "daily"]
+    if not chans:
+        return ""
+    is_current = (m.year == generated.year and m.month == generated.month)
+    ref = generated.date() if is_current else _dt.date(m.year, m.month, m.days_in_month)
+    chips, behind = [], []
+    for c in chans:
+        if c.name in config.MONTHLY_PLATFORMS:
+            chips.append(f'<span class="nchip mo"><b>{_e(c.name)}</b> · monthly</span>')
+            continue
+        lag = config.FRESHNESS_LAG_DAYS.get(c.name, config.FRESHNESS_LAG_DAYS["_default"])
+        expected = ref - _dt.timedelta(days=lag)
+        last = c.last_date
+        if last is None:
+            behind.append(c.name)
+            chips.append(f'<span class="nchip warn"><b>{_e(c.name)}</b> · no data</span>')
+        elif last >= expected:
+            chips.append(f'<span class="nchip ok"><b>{_e(c.name)}</b> · '
+                         f'{last.strftime("%d %b")} ✓</span>')
+        else:
+            behind.append(c.name)
+            chips.append(f'<span class="nchip warn"><b>{_e(c.name)}</b> · '
+                         f'{last.strftime("%d %b")} ⚠ exp {expected.strftime("%d %b")}</span>')
+    summary = (f'<span class="neg">⚠ Behind: {_e(", ".join(behind))}</span> — latest data older '
+               f'than expected.' if behind
+               else '<span class="pos">✓ All platforms current</span> — data up to the expected date.')
+    return (f'<div class="card notes">'
+            f'<div class="sec-h"><div class="name" style="font-size:13px">Data notes · freshness</div></div>'
+            f'<div class="grid-note" style="margin:2px 0 8px">{summary} '
+            f'Expected: T-1 for all · Amazon T-2 · Flipkart monthly.</div>'
+            f'<div class="nrow">{"".join(chips)}</div></div>')
+
+
+def _daily_filter_card(m: ReportModel, dim: int) -> str:
+    """One Date-wise table with a platform dropdown spanning BOTH sections. Each
+    platform's table (+ contribution strip for parents like Amazon) is pre-rendered
+    as a hidden pane; the dropdown toggles which shows (first by default)."""
+    sec_of = {c.name: s for s in m.sections for c in s.channels}
+    chans = [c for s in m.sections for c in s.channels if c.cadence == "daily"]
+    if not chans:
+        return ""
+    note = ('<div class="grid-note">Day-wise KPIs for the selected platform — money in ₹ (Lakh); '
+            'the GMV cell is shaded by that day’s growth vs the same day last month. Latest day '
+            'outlined. Amazon shows its Core / NOW+Fresh contribution split.</div>')
+    opts, panes = [], []
+    for i, c in enumerate(chans):
+        opts.append(f'<option value="{i}"{" selected" if i == 0 else ""}>{_e(c.name)}</option>')
+        strip = (_contrib_strip(sec_of[c.name], c.name) if c.name in config.SUBCHANNELS else "")
+        hidden = "" if i == 0 else " hidden"
+        panes.append(f'<div class="ptbl-pane" data-plat="{i}"{hidden}>{strip}'
+                     f'{_platform_daily_table(c, dim)}</div>')
+    picker = (f'<div class="picker platfilter"><label for="platPick">Platform</label>'
+              f'<select id="platPick" class="platpick" onchange="__showPlat(this)">'
+              f'{"".join(opts)}</select></div>')
+    return (f'<div class="card">'
+            f'<div class="sec-h"><div class="name">Daily KPIs by platform</div>{picker}</div>'
+            f'{note}{"".join(panes)}</div>')
+
+
 def _prev_month_label(year: int, month: int) -> str:
     """Calendar month before (year, month), e.g. (2025, 7) -> 'June 2025'."""
     y, mth = (year - 1, 12) if month == 1 else (year, month - 1)
     return _dt.date(y, mth, 1).strftime("%B %Y")
 
 
-def _month_pane(m: ReportModel, idx: int) -> str:
-    """One month's full content (header + KPIs + platform + daily blocks) as a
+def _month_pane(m: ReportModel, idx: int, generated: _dt.datetime) -> str:
+    """One month's full content (header + KPIs + notes + platform + daily) as a
     toggleable pane. idx 0 is visible; the rest start hidden."""
     dim = m.days_in_month
     asof = m.as_of.strftime("%d %b %Y") if m.as_of else "–"
     prev = _prev_month_label(m.year, m.month)
+    notes = _notes_card(m, generated)
     platform_block = ('<div class="section-label">Platform view · month-to-date</div>'
                       + "".join(_summary_card(s) for s in m.sections))
     daily_block = ('<div class="section-label">Date-wise detail</div>'
-                   + "".join(_daily_card(s, dim) for s in m.sections))
+                   + _daily_filter_card(m, dim))
     pending = (f'<div class="card" style="border-left:4px solid #b8860b;color:#7a5c00">'
                f'⚠ {_e(m.pending_note)}</div>') if m.pending_note else ""
     present = {s.name for s in m.sections}
@@ -350,7 +431,7 @@ def _month_pane(m: ReportModel, idx: int) -> str:
     </div>
     {_kpi_block(m)}
   </div>
-  {miss_note}{pending}
+  {notes}{miss_note}{pending}
   {platform_block}{daily_block}
 </section>"""
 
@@ -418,7 +499,7 @@ def render_multi(models: "list[ReportModel]", generated: _dt.datetime, freshness
         prev = _prev_month_label(m.year, m.month)
         sel = " selected" if i == 0 else ""
         opts.append(f'<option value="{i}" data-prev="{_e(prev)}"{sel}>{_e(m.month_label)}</option>')
-        panes.append(_month_pane(m, i))
+        panes.append(_month_pane(m, i, generated))
     first_prev = _prev_month_label(models[0].year, models[0].month)
     fresh_note = _freshness_note(freshness)
     foot = (
@@ -436,7 +517,10 @@ def render_multi(models: "list[ReportModel]", generated: _dt.datetime, freshness
     script = ("<script>function __showMonth(v){var s=document.getElementById('monthPicker');"
               "var o=s.options[s.selectedIndex];var p=document.querySelectorAll('.month-pane');"
               "for(var k=0;k<p.length;k++){p[k].hidden=(p[k].getAttribute('data-idx')!==v);}"
-              "document.getElementById('cmpMonth').textContent=o.getAttribute('data-prev');}</script>")
+              "document.getElementById('cmpMonth').textContent=o.getAttribute('data-prev');}"
+              "function __showPlat(sel){var pane=sel.closest('.month-pane');var v=sel.value;"
+              "var p=pane.querySelectorAll('.ptbl-pane');"
+              "for(var k=0;k<p.length;k++){p[k].hidden=(p[k].getAttribute('data-plat')!==v);}}</script>")
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Daily Sales Report — {_e(models[0].month_label)}</title><style>{CSS}</style></head>
