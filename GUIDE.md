@@ -75,8 +75,29 @@ independent layers, so a mistake in one place is caught by another:
   channels; grand total = sum of sections.
 - **C — model → HTML:** the HTML actually contains the headline figures, every
   channel's GMV, and every daily date — and does **not** show excluded channels.
+- **D — parsing completeness:** every channel with activity must have a GMV column
+  parsed (flags `units present but 0 GMV days` — the signature of a month-labelled
+  header being dropped, e.g. the Zepto Mar'26 bug).
+- **Cross-sheet check:** where both source sheets carry the same channel for a
+  month, their GMV totals must agree (see §3b).
 
-You want `QC: N/N checks passed ✔` before sending.
+You want `QC: N/N checks passed ✔` before sending. The full QC report is saved to
+`output/index_qc_summary.txt` and (in the cloud) **emailed daily** to divleen@barosi.in.
+
+## 3a. How the two source sheets are read & merged
+Column headers in the sheets are inconsistent, so field detection is tolerant
+(`data_source._field_of`): anything containing `gmv`/`value` → GMV (or **LM** if it
+also has `lm`/`last` or the previous month's name, e.g. `Feb GMV`, `Last Month GMV`);
+anything with `ad` → Ad Sales; `units` → Units. This is what fixes month-labelled
+headers like **`March GMV` / `Total Value`** that used to be silently dropped (→ GMV 0).
+
+## 3b. Two-sheet merge (overwrite, never sum)
+For each month BOTH workbooks are read and merged per channel by **overwrite**
+(`data_source._merge_channels`): prefer whichever sheet has data; if only one has it,
+use that; if neither, skip. When **both sheets have data but disagree**, the channel is
+**withheld (left blank) for that month** — never guessed — and a mismatch is recorded
+to `output/sheet_conflicts.txt`, which triggers an **email alert** (§8). Reconcile the
+sheets and re-run; nothing is ever summed across the two sheets.
 
 ---
 
@@ -289,6 +310,20 @@ Between Platform view and Date-wise detail sits a global **Trend** card: an inli
 from each month's `.grand`) is embedded once as `#trendData` JSON; `render_html._TREND_JS` draws it.
 To place one global chart between the two blocks, each month is split into a `_platform_pane` and a
 `_daily_pane` (both `.month-pane`, toggled together by the month dropdown) with the Trend between.
+
+### Email alerts (QC + mismatch)
+Two workflow email steps send to **divleen@barosi.in** (both skip silently until the
+SMTP secrets are set, so the report keeps publishing meanwhile):
+- **Daily QC report** — attaches `output/index_qc_summary.txt` every run (runs even if
+  the build fails, so you always get the validation).
+- **Mismatch alert** — fires only when `output/sheet_conflicts.txt` exists (two sheets
+  disagreed; that channel was left blank).
+- **Setup (one time):** add repo secrets `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`,
+  `SMTP_PASSWORD` (Settings → Secrets → Actions). For a barosi.in Google Workspace
+  mailbox: host `smtp.gmail.com`, port `465`, username `divleen@barosi.in`, password =
+  a **Google App Password** (needs 2-Step Verification; not the login password). The
+  mail step uses the third-party `dawidd6/action-send-mail` action — allow it under
+  Settings → Actions → General if prompted.
 
 ### Still manual
 - **WhatsApp PNG** — the cloud runner has no browser, so it skips the image

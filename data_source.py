@@ -415,12 +415,10 @@ def _merge_channels(qc_list, mkt_list, label):
             if ad and bd:
                 ga, gb = _channel_gmv(a), _channel_gmv(b)
                 if abs(ga - gb) > max(1.0, 0.001 * max(abs(ga), abs(gb))):
-                    # Sheets disagree — do NOT guess. Blank this channel's numbers
-                    # for the month and alert; the user reconciles and re-runs.
+                    # Sheets disagree — do NOT guess. Withhold this channel for the
+                    # month (left blank in the output) and alert; user reconciles
+                    # the sheets and re-runs. (Dropping keeps QC clean.)
                     conflicts.append(f"{label} · {name}: QC ₹{ga:,.0f} vs MKT ₹{gb:,.0f}")
-                    for r in b.records:
-                        r.gmv = r.lm_gmv = r.ad_spend = None
-                    merged.append(b)
                 else:
                     merged.append(b)          # values agree — keep either
             elif ad:

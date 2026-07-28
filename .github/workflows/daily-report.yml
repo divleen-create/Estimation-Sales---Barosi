@@ -71,6 +71,26 @@ jobs:
             sheets, then re-run the report. Details attached.
           attachments: output/sheet_conflicts.txt
 
+      - name: Email daily QC report
+        # Runs whenever a QC summary exists — even if the build failed — so the
+        # daily validation (reconciliation, parsing, cross-sheet, freshness) always
+        # lands. Skips silently until SMTP secrets are configured.
+        if: ${{ always() && env.SMTP_HOST != '' && hashFiles('output/index_qc_summary.txt') != '' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from: Sales Report Bot <${{ secrets.SMTP_USERNAME }}>
+          to: divleen@barosi.in
+          subject: "Daily Sales Report — QC validation"
+          body: |
+            Daily QC validation for the sales report is attached (reconciliation vs
+            Excel, GMV-parsing completeness, cross-sheet check, estimate freshness).
+          attachments: output/index_qc_summary.txt
+
       - name: Commit and push updated report
         run: |
           cp output/index.html index.html   # Pages serves the repo-root index.html

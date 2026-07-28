@@ -83,7 +83,9 @@ def main() -> None:
     qc.print_report(results)
     qc.print_freshness(freshness)
     summary_path = html_path.with_name(html_path.stem + "_qc_summary.txt")
-    summary_path.write_text(qc.summary_text(results, freshness), encoding="utf-8")
+    summary_path.write_text(
+        qc.summary_text(results, freshness, conflicts=conflicts,
+                        month_label=model.month_label), encoding="utf-8")
     print(f"\nQC summary saved: {summary_path}")
     if not passed and args.strict:
         raise SystemExit("QC failed and --strict set; PNG not generated.")

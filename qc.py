@@ -160,6 +160,17 @@ def _freshness(model, diags, days_in_month) -> list[Freshness]:
     return out
 
 
+def _layer_d_parsing(model, results):
+    """Parsing completeness: any channel with activity must have a GMV column
+    parsed. Catches month-labelled headers ('March GMV', 'Total Value', 'Last
+    Month GMV') being silently dropped -> units present but zero GMV days."""
+    for s in model.sections:
+        for c in s.channels:
+            ok = not (c.units_mtd and c.days_with_data == 0)
+            results.append(("D parsing", f"{c.name} GMV parsed",
+                            ok, f"units={c.units_mtd:,.0f} gmv_days={c.days_with_data}"))
+
+
 # --- runner -----------------------------------------------------------------
 def compute_freshness(model, diags=None) -> list[Freshness]:
     """Estimate-freshness audit for a given model (loads sheet diagnostics)."""
@@ -176,6 +187,7 @@ def run(html_path: Optional[Path] = None, model=None, diags=None):
     _layer_b_identities(model, results)
     if html_path and Path(html_path).exists():
         _layer_c_html(model, Path(html_path).read_text(encoding="utf-8"), results)
+    _layer_d_parsing(model, results)
     freshness = _freshness(model, diags, model.days_in_month)
     passed = all(ok for _, _, ok, _ in results)
     return passed, results, freshness
@@ -206,13 +218,43 @@ def print_freshness(freshness: list[Freshness]) -> None:
         print("\n  ➜ Excel estimates are all up to date and match. ✔")
 
 
-def summary_text(results, freshness: list[Freshness]) -> str:
-    """Plain-text summary (QC result + estimate freshness) for saving/sharing."""
+def summary_text(results, freshness: list[Freshness], conflicts=None,
+                 month_label: str = "") -> str:
+    """Plain-text QC report for saving / the daily email. Covers: overall
+    pass/fail, any failures, the Excel-vs-output reconciliation and parsing
+    completeness (both drive pass/fail), cross-sheet mismatches, and estimate
+    freshness (advisory)."""
     total, ok = len(results), sum(1 for _, _, o, _ in results if o)
-    lines = [f"QC self-check: {ok}/{total} checks passed "
-             f"{'(all good)' if ok == total else '- FAILURES, see console'}",
-             "",
-             "Estimate freshness (our data-driven run-rate vs Excel's estimate cell):"]
+    # per-layer tallies
+    layers: dict[str, list] = {}
+    for layer, name, okk, detail in results:
+        layers.setdefault(layer, []).append((name, okk, detail))
+    def tally(prefix):
+        items = [i for lyr, it in layers.items() if lyr.startswith(prefix) for i in it]
+        return sum(1 for _, o, _ in items if o), len(items)
+
+    a_ok, a_n = tally("A")   # Excel Total-row vs output (reconciliation)
+    d_ok, d_n = tally("D")   # parsing completeness
+    head = "ALL GOOD" if ok == total else "FAILURES PRESENT — DO NOT TRUST NUMBERS"
+    lines = [
+        f"DAILY QC VALIDATION{(' — ' + month_label) if month_label else ''}",
+        f"Overall: {ok}/{total} checks passed  [{head}]",
+        "",
+        f"  Excel Total-row vs output (reconciliation): {a_ok}/{a_n} channels reconcile",
+        f"  GMV column parsed for every active channel:  {d_ok}/{d_n} ok",
+    ]
+    fails = [(lyr, n, dt) for lyr, its in layers.items() for n, o, dt in its if not o]
+    if fails:
+        lines += ["", "FAILURES:"]
+        lines += [f"  [{lyr}] {n} — {dt}" for lyr, n, dt in fails]
+
+    lines += ["", "Cross-sheet check (QC sheet vs Marketplace sheet, same month):"]
+    if conflicts:
+        lines += [f"  MISMATCH (left blank in output, needs reconcile): {c}" for c in conflicts]
+    else:
+        lines += ["  No mismatches — where both sheets carry a channel, values agree."]
+
+    lines += ["", "Estimate freshness (our data-driven run-rate vs Excel's estimate cell):"]
     tag = {"OK": "[OK]", "STALE": "[STALE]", "MISMATCH": "[STALE]", "NO_EXCEL": "[--]"}
     for f in freshness:
         lines.append(f"  {tag.get(f.status,'[?]')} {f.channel}: {f.message}")
