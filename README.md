@@ -61,7 +61,7 @@ August data lands; falls back to the last populated month). See GUIDE.md.
 | `render_html.py` | self-contained HTML one-pager |
 | `render_image.py` | HTML → WhatsApp PNG (headless Chrome/Edge + autocrop) |
 | `main.py` | orchestrates resolve → transform → render → QC |
-| `qc.py` | 3-layer self-check: sheet→model, identities, model→HTML |
+| `qc.py` | 6-layer self-check: A sheet→model · B identities · C model→HTML · D parsing · E business edge cases · F page structure (+ advisory estimate-freshness and sanity audits). See GUIDE §3 |
 | `gsheets.py` | optional **read-only** Google Sheets → local snapshot |
 
 ## Switching to live Google Sheets (read-only)

@@ -20,7 +20,7 @@ except Exception:
 import config
 import qc
 from transform import build_report, link_previous
-from data_source import load_sheet_diagnostics, list_periods
+from data_source import load_sheet_diagnostics, list_periods, source_fingerprint
 from render_html import write_html_multi
 from render_image import html_to_png
 import fmt
@@ -37,6 +37,9 @@ def main() -> None:
     # this runs — the GitHub runner's clock is UTC.
     IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
     generated = _dt.datetime.now(IST)
+    # Fingerprint the source workbooks BEFORE reading, so QC can prove the
+    # read-only rule held (nothing was written to a source during the run).
+    fp_before = source_fingerprint()
     # Build the CURRENT month once (honors FORCE_PERIOD) — this is the month QC
     # gates and leadership acts on. Thread its model/diags through render + QC.
     model = build_report()
@@ -78,14 +81,19 @@ def main() -> None:
     elif conflict_file.exists():
         conflict_file.unlink()
 
-    # 2) QC self-check: sheet→model, identities, model→html (+ estimate audit)
-    passed, results, freshness = qc.run(html_path, model=model, diags=diags)
+    # 2) QC self-check: A sheet→model, B identities, C model→html, D parsing,
+    #    E business edge cases, F page structure (+ advisory audits).
+    ctx = qc.build_context(fp_before=fp_before)
+    passed, results, freshness, notes = qc.run(html_path, model=model, diags=diags,
+                                               models=models, ctx=ctx)
     qc.print_report(results)
     qc.print_freshness(freshness)
+    qc.print_advisories(notes)
     summary_path = html_path.with_name(html_path.stem + "_qc_summary.txt")
     summary_path.write_text(
         qc.summary_text(results, freshness, conflicts=conflicts,
-                        month_label=model.month_label), encoding="utf-8")
+                        month_label=model.month_label, model=model, diags=diags,
+                        notes=notes, generated=generated), encoding="utf-8")
     print(f"\nQC summary saved: {summary_path}")
     if not passed and args.strict:
         raise SystemExit("QC failed and --strict set; PNG not generated.")

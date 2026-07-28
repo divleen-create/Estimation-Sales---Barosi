@@ -71,11 +71,42 @@ jobs:
             sheets, then re-run the report. Details attached.
           attachments: output/sheet_conflicts.txt
 
+      - name: Prepare QC email
+        # Put the whole validation in the email BODY (not just the attachment) so
+        # the numbers and edge cases are readable on a phone, and surface the
+        # pass/fail verdict in the subject line.
+        if: ${{ always() }}
+        run: |
+          if [ -f output/index_qc_summary.txt ]; then
+            {
+              echo "Daily QC validation for the sales report."
+              echo "Full detail below (also attached): Excel-vs-output reconciliation per"
+              echo "channel, internal identities, output-HTML check, parsing completeness,"
+              echo "business edge cases (T-2 lag, sub-channel roll-up, two-sheet merge,"
+              echo "no-bluffing), page structure, estimate freshness and sanity advisories."
+              echo
+              echo "Report: https://divleen-create.github.io/Estimation-Sales---Barosi/"
+              echo "------------------------------------------------------------------"
+              echo
+              cat output/index_qc_summary.txt
+            } > output/qc_email_body.txt
+            echo "QC_VERDICT=$(grep -m1 '^Overall:' output/index_qc_summary.txt | sed 's/^Overall: //' || echo 'see body')" >> $GITHUB_ENV
+          else
+            mkdir -p output
+            # Keep the attachment resolvable so the mail still sends on a failed build.
+            printf '%s\n' \
+              "DAILY QC VALIDATION — not produced." \
+              "The build failed before the QC step ran; no numbers were validated and" \
+              "nothing new was published (the last good report stays live)." \
+              "Check the GitHub Actions log for this run." > output/index_qc_summary.txt
+            cp output/index_qc_summary.txt output/qc_email_body.txt
+            echo "QC_VERDICT=BUILD FAILED (no QC summary)" >> $GITHUB_ENV
+          fi
+
       - name: Email daily QC report
-        # Runs whenever a QC summary exists — even if the build failed — so the
-        # daily validation (reconciliation, parsing, cross-sheet, freshness) always
-        # lands. Skips silently until SMTP secrets are configured.
-        if: ${{ always() && env.SMTP_HOST != '' && hashFiles('output/index_qc_summary.txt') != '' }}
+        # Runs even if the build failed — so the daily validation always lands.
+        # Skips silently until SMTP secrets are configured.
+        if: ${{ always() && env.SMTP_HOST != '' }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.SMTP_HOST }}
@@ -85,10 +116,8 @@ jobs:
           password: ${{ secrets.SMTP_PASSWORD }}
           from: Sales Report Bot <${{ secrets.SMTP_USERNAME }}>
           to: divleen@barosi.in
-          subject: "Daily Sales Report — QC validation"
-          body: |
-            Daily QC validation for the sales report is attached (reconciliation vs
-            Excel, GMV-parsing completeness, cross-sheet check, estimate freshness).
+          subject: "Daily Sales Report — QC validation: ${{ env.QC_VERDICT }}"
+          body: file://output/qc_email_body.txt
           attachments: output/index_qc_summary.txt
 
       - name: Commit and push updated report

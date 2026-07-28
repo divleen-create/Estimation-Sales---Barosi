@@ -1,28 +1,49 @@
-"""In-code QC self-check + Excel estimate-freshness audit.
+"""In-code QC self-check: Excel-vs-output reconciliation, identities, HTML,
+parsing, business edge cases, page structure — plus advisory audits.
 
-Correctness layers (drive pass/fail):
-  A. SHEET → MODEL   Every channel's GMV / LM / units must equal the sheet's
-                     OWN Total-row cells (independent ground truth).
-  B. IDENTITIES      Model is internally consistent — growth/estimate/gap
-                     formulas hold; section totals = Σ channels; grand = Σ sections.
+Correctness layers (drive pass/fail; `--strict` blocks the publish on any fail):
+  A. SHEET → MODEL   Every channel's GMV / LM / units / ad must equal the sheet's
+                     OWN Total-row cells (independent ground truth), and ad-contri
+                     must match the sheet's own Ad/Value ratio where it exists.
+  B. IDENTITIES      Model is internally consistent — growth / estimate / gap /
+                     ad-contri formulas hold; section totals = Σ channels;
+                     grand = Σ sections (GMV, LM, units, ad, estimate, gap).
   C. MODEL → HTML    The HTML contains the headline + per-channel figures + daily
                      dates, and does NOT show excluded channels.
+  D. PARSING         Every channel with activity has a GMV column parsed (catches
+                     month-labelled headers like 'March GMV' being dropped → GMV 0).
+  E. EDGE CASES      The agreed business rules, each as a check: sub-channel
+                     roll-up (Amazon ≈ Core + NOW+Fresh), T-2 lag never read as
+                     degrowth, ad-lag blanks stay blank, Shopify gross-not-net,
+                     dropped columns really dropped, two-sheet merge overwrote
+                     (never summed), conflicted channels withheld, no bluffing,
+                     date-grid sanity, no stray 'xx'/'Total' channel.
+  F. STRUCTURE       Page integrity: one pane + one dropdown option per month,
+                     one daily table per daily platform (sub-channels get none),
+                     Amazon contribution strip, trend dataset well-formed and
+                     agreeing with the model, freshness card, pending-month note.
 
-Advisory audit (does NOT fail the run):
-  D. ESTIMATE FRESHNESS  We always compute the run-rate estimate from the days
-                     of data we actually have (per platform: divisor = day-of-month
-                     of that platform's latest data). We then compare against the
-                     sheet's estimate cell and the day-count baked into its formula
-                     — so you can see whether someone forgot to update the "days"
-                     in Excel. Reported as text; re-run after data updates and it
-                     re-checks automatically.
+Advisory audits (reported, never block):
+  * ESTIMATE FRESHNESS  Our run-rate (divisor = the platform's own latest data
+                     day) vs the sheet's estimate cell and the day-count baked
+                     into its formula — shows when Excel's "days" is stale.
+  * SANITY ADVISORIES  Per-platform data freshness vs the expected lag, ad-lag
+                     tails entered as 0 instead of blank, ad-contri and growth
+                     outliers, negative daily cells, and the read-only guarantee
+                     (source workbooks unchanged by the run).
 
 Usage:
-    ok, results, freshness = qc.run(html_path)
+    ok, results, freshness = qc.run(html_path)                    # figures only
+    ok, results, freshness, advisories = qc.run(html_path, model=m, diags=d,
+                                                models=all_months, full=True)
 """
 from __future__ import annotations
+import calendar
+import datetime as _dt
+import json
+import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -33,15 +54,22 @@ except Exception:
 
 import config
 import fmt
-from data_source import load_sheet_diagnostics
+from data_source import (cross_sheet_gmv, load_sheet_diagnostics, parsed_columns,
+                         raw_headers, source_fingerprint)
 from transform import build_report
 
 REL_TOL = 0.001  # 0.1%
+IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
 
 
-def _close(a, b) -> bool:
+def _close(a, b, tol: float = REL_TOL) -> bool:
     a, b = (a or 0), (b or 0)
-    return abs(a - b) <= max(1.0, abs(b) * REL_TOL)
+    return abs(a - b) <= max(1.0, abs(b) * tol)
+
+
+def _today() -> _dt.date:
+    """'Today' in IST — the report's reference clock, wherever it runs."""
+    return _dt.datetime.now(IST).date()
 
 
 # --- correctness layers -----------------------------------------------------
@@ -67,18 +95,38 @@ def _layer_a_sheet_vs_model(model, diags, results):
 
 
 def _layer_b_identities(model, results):
+    dim = model.days_in_month
     for s in model.sections:
         for key, tot, chsum in [
             ("Σunits", s.totals.units_mtd, sum(c.units_mtd for c in s.channels)),
             ("ΣGMV", s.totals.gmv_mtd, sum(c.gmv_mtd for c in s.channels)),
             ("ΣLM", s.totals.lm_mtd, sum(c.lm_mtd for c in s.channels)),
+            ("Σad", s.totals.ad_mtd, sum(c.ad_mtd for c in s.channels)),
             ("Σest", s.totals.estimate, sum(c.estimate for c in s.channels)),
+            ("Σgap", s.totals.gap, sum(c.gap for c in s.channels)),
         ]:
             results.append(("B identities", f"{s.name} {key}", _close(tot, chsum),
                             f"{tot:,.1f} vs {chsum:,.1f}"))
         for c in s.channels:
             results.append(("B identities", f"{c.name} gap=est-gmv",
                             _close(c.gap, c.estimate - c.gmv_mtd), ""))
+            # Run-rate uses the platform's OWN latest data day as the divisor
+            # (Amazon T-2 → ÷N-2 while quick commerce → ÷N), not a global day count.
+            if c.last_date:
+                want = c.gmv_mtd / c.last_date.day * dim
+                results.append(("B identities", f"{c.name} est=gmv/{c.last_date.day}x{dim}",
+                                _close(c.estimate, want),
+                                f"{c.estimate:,.1f} vs {want:,.1f}"))
+            # MTD figures must equal the sum of the daily cells that back them —
+            # catches a daily grid that drifts from the summary card.
+            sums = [("GMV", c.gmv_mtd, [d.gmv for d in c.daily]),
+                    ("units", c.units_mtd, [d.units for d in c.daily]),
+                    ("ad", c.ad_mtd, [d.ad_spend for d in c.daily])]
+            if not model.lm_linked:   # a linked baseline has no per-day LM for every day
+                sums.append(("LM", c.lm_mtd, [d.lm_gmv for d in c.daily]))
+            for key, mtd, cells in sums:
+                results.append(("B identities", f"{c.name} MTD {key}=Σdaily",
+                                _close(mtd, sum(v for v in cells if v is not None)), ""))
             if c.growth is not None and c.lm_mtd:
                 results.append(("B identities", f"{c.name} growth=(g-lm)/lm",
                                 _close(c.growth, (c.gmv_mtd - c.lm_mtd) / c.lm_mtd), ""))
@@ -87,9 +135,17 @@ def _layer_b_identities(model, results):
                                 _close(c.ad_contri, c.ad_mtd / c.gmv_mtd), ""))
     for key, g, ssum in [
         ("GMV", model.grand.gmv_mtd, sum(s.totals.gmv_mtd for s in model.sections)),
+        ("LM", model.grand.lm_mtd, sum(s.totals.lm_mtd for s in model.sections)),
+        ("units", model.grand.units_mtd, sum(s.totals.units_mtd for s in model.sections)),
+        ("ad", model.grand.ad_mtd, sum(s.totals.ad_mtd for s in model.sections)),
         ("estimate", model.grand.estimate, sum(s.totals.estimate for s in model.sections)),
+        ("gap", model.grand.gap, sum(s.totals.gap for s in model.sections)),
     ]:
         results.append(("B identities", f"grand {key}", _close(g, ssum), f"{g:,.1f} vs {ssum:,.1f}"))
+    if model.grand.lm_mtd:
+        want = (model.grand.gmv_mtd - model.grand.lm_mtd) / model.grand.lm_mtd
+        results.append(("B identities", "grand growth=(g-lm)/lm",
+                        _close(model.grand.growth, want), f"{model.grand.growth} vs {want}"))
 
 
 def _layer_c_html(model, html_text, results):
@@ -113,6 +169,229 @@ def _layer_c_html(model, html_text, results):
     for ex in config.EXCLUDED_CHANNELS:
         results.append(("C model→html", f"{ex} excluded",
                         f'class="chan">{ex}' not in html_text, "must not be a channel row"))
+
+
+# --- layer E: business edge cases ------------------------------------------
+@dataclass
+class EdgeContext:
+    """Extra sheet-level facts layer E needs (columns actually parsed, raw headers,
+    each sheet's own per-channel GMV before the merge, source fingerprint)."""
+    columns: dict = field(default_factory=dict)
+    headers: dict = field(default_factory=dict)
+    cross: dict = field(default_factory=dict)
+    fp_before: Optional[dict] = None
+    today: Optional[_dt.date] = None
+
+
+def build_context(period=None, fp_before: Optional[dict] = None) -> EdgeContext:
+    return EdgeContext(columns=parsed_columns(period), headers=raw_headers(period),
+                       cross=cross_sheet_gmv(period), fp_before=fp_before,
+                       today=_today())
+
+
+def _conflicted_names(model) -> set:
+    """Channel names withheld this month because the two sheets disagreed.
+    Conflict lines read '<month> · <channel>: QC ₹x vs MKT ₹y'."""
+    out = set()
+    for conf in model.merge_conflicts:
+        tail = str(conf).split("·")[-1]
+        out.add(tail.split(":")[0].strip())
+    return out
+
+
+def _layer_e_edges(model, ctx: EdgeContext, results):
+    """The agreed business rules, each as a pass/fail check. Everything here is
+    guaranteed by our own code or config, so a failure means a real regression
+    (layout change, rule broken) — not merely late data."""
+    def chk(name, ok, detail=""):
+        results.append(("E edge cases", name, bool(ok), detail))
+
+    chans = {c.name: c for s in model.sections for c in s.channels}
+    today = ctx.today or _today()
+
+    # 1) Sub-channel roll-up: the parent is (approximately) the sum of its parts,
+    #    and the parts never get a day-wise table of their own.
+    for parent, subs in config.SUBCHANNELS.items():
+        p, parts = chans.get(parent), [chans[s] for s in subs if s in chans]
+        if not p or not parts:
+            continue
+        for key, pv, sv in (("GMV", p.gmv_mtd, sum(x.gmv_mtd for x in parts)),
+                            ("LM", p.lm_mtd, sum(x.lm_mtd for x in parts))):
+            chk(f"{parent} ≈ Σ sub-channels {key}", _close(sv, pv, config.ROLLUP_TOL),
+                f"parts={sv:,.0f} parent={pv:,.0f} "
+                f"({'+'.join(x.name for x in parts)}; tol {config.ROLLUP_TOL:.0%})")
+        for x in parts:
+            chk(f"{x.name} is a sub-channel (no own daily table)", x.cadence == "sub",
+                f"cadence={x.cadence}")
+
+    # 2) Per-channel invariants.
+    for name, c in chans.items():
+        gmv_cells = [d for d in c.daily if d.gmv is not None]
+        # A blank day must never read as a drop (Amazon T-2 / any pending day).
+        blank_growth = [d.date.strftime("%d %b") for d in c.daily
+                        if d.gmv is None and d.growth is not None]
+        chk(f"{name} blank day never shows growth", not blank_growth,
+            f"offending: {', '.join(blank_growth[:5])}")
+        chk(f"{name} days_with_data = GMV cells",
+            c.days_with_data == len(gmv_cells), f"{c.days_with_data} vs {len(gmv_cells)}")
+        # No bluffing: no figure may exist without a day of data behind it.
+        chk(f"{name} no figure without data",
+            c.days_with_data > 0 or (c.gmv_mtd == 0 and c.estimate == 0),
+            f"days={c.days_with_data} gmv={c.gmv_mtd:,.0f} est={c.estimate:,.0f}")
+        chk(f"{name} MTD figures non-negative",
+            min(c.gmv_mtd, c.units_mtd, c.ad_mtd, c.lm_mtd) >= 0,
+            f"gmv={c.gmv_mtd:,.0f} units={c.units_mtd:,.0f} ad={c.ad_mtd:,.0f}")
+        # Date grid: unique, ascending, inside the reporting month, never ahead of today.
+        ds = [d.date for d in c.daily]
+        chk(f"{name} dates unique & ascending", ds == sorted(ds) and len(ds) == len(set(ds)),
+            f"{len(ds)} rows, {len(set(ds))} distinct")
+        chk(f"{name} dates inside {model.month_label}",
+            all(d.year == model.year and d.month == model.month for d in ds),
+            f"first={ds[0] if ds else '-'} last={ds[-1] if ds else '-'}")
+        future = [d.date.strftime("%d %b") for d in gmv_cells if d.date > today]
+        chk(f"{name} no future-dated GMV", not future, f"{', '.join(future[:5])}")
+        chk(f"{name} last data day ≤ month length",
+            not c.last_date or c.last_date.day <= model.days_in_month,
+            f"last={c.last_date} dim={model.days_in_month}")
+
+    # 3) Lag channels (Amazon GMV T-2): the pending tail must stay BLANK, not 0.
+    for name, lag in config.LAG_DAYS.items():
+        c = chans.get(name)
+        if not c or not c.last_date:
+            continue
+        tail = [d for d in c.daily if d.date > c.last_date]
+        zeros = [d.date.strftime("%d %b") for d in tail if d.gmv is not None]
+        chk(f"{name} T-{lag} tail is pending, not zero", not zeros,
+            f"days after {c.last_date:%d %b} carrying a value: {', '.join(zeros[:5])}")
+
+    # 4) Ad columns: every channel expected to carry Ad Sales still does. Losing
+    #    one silently shows Ad Sales 0 — the same failure mode as the GMV bug.
+    for name in sorted(config.AD_CHANNELS & set(chans)):
+        chk(f"{name} Ad Sales column present", chans[name].has_ad,
+            f"ad_mtd={chans[name].ad_mtd:,.0f}")
+
+    # 5) Dropped source columns really are dropped (Shopify 'Total Sale' = net,
+    #    'Dolchi' = sub-brand split): GMV must stay the gross 'Value' column.
+    for sheet, chmap in ctx.columns.items():
+        for name, flds in chmap.items():
+            bad = sorted(set(flds) & config.DROPPED_FIELDS)
+            chk(f"{name} [{sheet}] no dropped column parsed", not bad,
+                f"leaked: {bad}; parsed={sorted(flds)}")
+    for sheet in ("MKT", "QC"):
+        sh = ctx.columns.get(sheet, {}).get("Shopify")
+        if sh:
+            chk("Shopify GMV = gross 'Value' column", "gmv" in sh, f"parsed={sorted(sh)}")
+            break
+
+    # 6) Two-sheet merge OVERWROTE — the model equals one sheet, never their sum.
+    conflicted = _conflicted_names(model)
+    for name, c in chans.items():
+        pair = ctx.cross.get(name)
+        if not pair:
+            continue
+        sides = {k: v for k, v in pair.items() if v is not None}
+        if not sides:
+            continue
+        matches_one = any(_close(c.gmv_mtd, v) for v in sides.values())
+        is_sum = len(sides) == 2 and _close(c.gmv_mtd, sum(sides.values()))
+        chk(f"{name} merge kept one sheet (never summed)", matches_one and not is_sum,
+            "model={:,.0f} · {}".format(
+                c.gmv_mtd, " · ".join(f"{k}={v:,.0f}" for k, v in sides.items())))
+    # 7) A conflicted channel must be WITHHELD, and nothing else may go missing.
+    for name in conflicted:
+        chk(f"conflicted '{name}' withheld from output", name not in chans,
+            "two sheets disagreed → must be blank")
+    for name, pair in ctx.cross.items():
+        if any(v for v in pair.values() if v):
+            chk(f"{name} reached the output", name in chans or name in conflicted,
+                f"sheet has GMV {pair} but the channel is absent")
+
+    # 8) No stray group became a channel ('Total', 'xx', excluded names).
+    allowed = set(config.CHANNEL_ALIASES.values())
+    for name in chans:
+        chk(f"'{name}' is a recognised channel",
+            name in allowed and name not in config.EXCLUDED_CHANNELS
+            and name.strip().lower() not in config.CHANNEL_SKIP, "")
+
+    # 9) Month/period integrity.
+    chk("days_in_month matches the calendar",
+        model.days_in_month == calendar.monthrange(model.year, model.month)[1],
+        f"{model.days_in_month}")
+    latest = max((c.last_date for c in chans.values() if c.last_date), default=None)
+    chk("'Data as of' = latest data date anywhere", model.as_of == latest,
+        f"as_of={model.as_of} latest={latest}")
+    chk("current month is not LM-linked (uses the sheet's own LM column)",
+        not model.lm_linked, "LM must come from the sheet for the reported month")
+
+
+# --- layer F: page structure ------------------------------------------------
+def _layer_f_structure(models, html_text, results, complete: bool = True):
+    """The rendered page matches the model set: one pane and one dropdown option
+    per month, one daily table per daily platform (sub-channels get none), the
+    Amazon contribution strip, a well-formed trend dataset, freshness card.
+
+    `complete` says whether `models` is the FULL set the page was rendered from;
+    when it is not (e.g. `python qc.py` builds only the current month), the
+    count-based checks are skipped rather than failed."""
+    def chk(name, ok, detail=""):
+        results.append(("F structure", name, bool(ok), detail))
+
+    if not models or not html_text:
+        return
+    m0 = models[0]
+    if complete:
+        n_panes = html_text.count('class="month-pane"')
+        chk("month panes = 2 per month (platform + daily)", n_panes == 2 * len(models),
+            f"found {n_panes} for {len(models)} months")
+        want_daily = sum(1 for m in models for s in m.sections
+                         for c in s.channels if c.cadence == "daily")
+        n_tbl = html_text.count('class="ptbl-pane"')
+        chk("one daily table per platform-month", n_tbl == want_daily,
+            f"{n_tbl} panes vs {want_daily} daily platforms")
+    for i, m in enumerate(models):
+        seen = html_text.count('data-idx="%d"' % i)
+        chk(f"{m.month_label} pane pair", seen == 2, f"found {seen}")
+        chk(f"{m.month_label} in the month dropdown",
+            f">{m.month_label}</option>" in html_text, "")
+    chk("current month is the default pane",
+        bool(re.search(r'<option value="0" data-prev="[^"]*" selected>', html_text)), "")
+    opts = re.findall(r'<select id="platPick"[^>]*>(.*?)</select>', html_text, re.S)
+    for sub in [s for v in config.SUBCHANNELS.values() for s in v]:
+        chk(f"{sub} not offered as its own daily table",
+            all(f">{sub}<" not in o for o in opts), "sub-channels roll into the parent")
+    for parent, subs in config.SUBCHANNELS.items():
+        p = next((c for s in m0.sections for c in s.channels if c.name == parent), None)
+        if p and p.gmv_mtd and any(c.name in subs for s in m0.sections for c in s.channels):
+            chk(f"{parent} contribution strip rendered",
+                f"Contribution to {parent} GMV" in html_text, "")
+    chk("freshness / data-notes card rendered", "Data notes · freshness" in html_text, "")
+    if m0.pending_note:
+        chk("pending-month note rendered", m0.pending_note in html_text, "")
+
+    blob = re.search(r'<script id="trendData" type="application/json">(.*?)</script>',
+                     html_text, re.S)
+    chk("trend dataset embedded", bool(blob), "")
+    if not blob:
+        return
+    try:
+        data = json.loads(blob.group(1))
+    except Exception as e:  # noqa: BLE001
+        chk("trend dataset is valid JSON", False, str(e))
+        return
+    chk("trend dataset is valid JSON", True, "")
+    chk("trend has the consolidated 'All' series", "All" in data, "")
+    malformed = [f"{p}/{k}/{y}" for p, kp in data.items() for k, ys in kp.items()
+                 for y, arr in ys.items() if len(arr) != 12]
+    chk("every trend series has 12 month slots", not malformed,
+        f"{len(malformed)} malformed: {malformed[:3]}")
+    missing = [c.name for s in m0.sections for c in s.channels
+               if c.cadence == "daily" and c.name not in data]
+    chk("every daily platform has a trend series", not missing, f"missing: {missing}")
+    for kpi, attr in (("gmv", "gmv_mtd"), ("units", "units_mtd"), ("ad", "ad_mtd"),
+                      ("estimate", "estimate"), ("gap", "gap")):
+        v = (data.get("All", {}).get(kpi, {}).get(str(m0.year)) or [None] * 12)[m0.month - 1]
+        chk(f"trend '{kpi}' current month = model", _close(v, getattr(m0.grand, attr)),
+            f"chart={v} model={getattr(m0.grand, attr)}")
 
 
 # --- advisory: estimate freshness ------------------------------------------
@@ -171,6 +450,128 @@ def _layer_d_parsing(model, results):
                             ok, f"units={c.units_mtd:,.0f} gmv_days={c.days_with_data}"))
 
 
+# --- advisory: sanity checks that must never block the publish --------------
+@dataclass
+class Advisory:
+    level: str      # OK | WARN | INFO
+    name: str
+    message: str
+
+
+def advisories(model, models=None, ctx: Optional[EdgeContext] = None) -> list[Advisory]:
+    """Things worth knowing that are NOT our bug and must not stop the report:
+    late data, sheet oddities, distorted growth from a lagging tail, outliers,
+    and the read-only guarantee."""
+    out: list[Advisory] = []
+    ctx = ctx or EdgeContext(today=_today())
+    today = ctx.today or _today()
+    chans = {c.name: c for s in model.sections for c in s.channels}
+
+    # 1) Data freshness per platform (same rule as the page's notes card).
+    is_current = (model.year, model.month) == (today.year, today.month)
+    ref = today if is_current else _dt.date(model.year, model.month, model.days_in_month)
+    behind = []
+    for name, c in chans.items():
+        if c.cadence != "daily" or name in config.MONTHLY_PLATFORMS:
+            continue
+        lag = config.FRESHNESS_LAG_DAYS.get(name, config.FRESHNESS_LAG_DAYS["_default"])
+        expected = ref - _dt.timedelta(days=lag)
+        if c.last_date is None:
+            behind.append(f"{name}: no data")
+        elif c.last_date < expected:
+            behind.append(f"{name}: {c.last_date:%d %b} (expected {expected:%d %b}, T-{lag})")
+    out.append(Advisory("WARN" if behind else "OK", "Data freshness (expected lag)",
+                        "; ".join(behind) if behind
+                        else f"all platforms current as of {ref:%d %b} (T-1, Amazon T-2)"))
+
+    # 2) Lag tail vs growth: totals are full-column (matching the sheet's Total
+    #    row), so a T-2 platform's LM includes days whose GMV has not landed —
+    #    report the like-for-like number beside it so nobody reads a false drop.
+    for name in config.LAG_DAYS:
+        c = chans.get(name)
+        if not c or not c.lm_mtd:
+            continue
+        lfl_lm = sum(d.lm_gmv for d in c.daily if d.gmv is not None and d.lm_gmv is not None)
+        if not lfl_lm:
+            continue
+        full = c.growth
+        lfl = (c.gmv_mtd - lfl_lm) / lfl_lm
+        gap_days = len([d for d in c.daily if d.gmv is None and d.lm_gmv is not None])
+        out.append(Advisory("INFO" if abs((full or 0) - lfl) > 0.02 else "OK",
+                            f"{name} T-{config.LAG_DAYS[name]} growth view",
+                            f"reported {fmt.pct(full)} (full column, = sheet Total) vs "
+                            f"{fmt.pct(lfl)} like-for-like on the {c.days_with_data} days that "
+                            f"have GMV; {gap_days} pending day(s) carry LM but no GMV"))
+
+    # 3) Ad-lag tail entered as 0 rather than left blank (reads as "no spend").
+    zero_tail = []
+    for name, lag in config.AD_LAG_DAYS.items():
+        c = chans.get(name)
+        if not c or not c.has_ad or not c.last_date:
+            continue
+        cutoff = c.last_date - _dt.timedelta(days=lag - 1)
+        zeros = [f"{d.date:%d %b}" for d in c.daily
+                 if d.date >= cutoff and d.ad_spend == 0]
+        if zeros:
+            zero_tail.append(f"{name}: {', '.join(zeros)}")
+    out.append(Advisory("WARN" if zero_tail else "OK", "Ad T-2 tail blank (not 0)",
+                        "; ".join(zero_tail) + " — a typed 0 reads as 'no spend'"
+                        if zero_tail else "pending ad days are blank, shown as '–'"))
+
+    # 4) Outliers worth a human glance.
+    hot = [f"{n}: {c.ad_contri*100:.1f}%" for n, c in chans.items()
+           if c.ad_contri and c.ad_contri > 0.25]
+    out.append(Advisory("WARN" if hot else "OK", "Ad contribution outliers (>25%)",
+                        "; ".join(hot) if hot else "all channels within 25% of GMV"))
+    wild = [f"{n} {d.date:%d %b} {d.growth*100:+.0f}%" for n, c in chans.items()
+            for d in c.daily if d.growth is not None and abs(d.growth) > 3]
+    out.append(Advisory("INFO" if wild else "OK", "Daily growth outliers (>±300%)",
+                        "; ".join(wild[:8]) + (f" (+{len(wild)-8} more)" if len(wild) > 8 else "")
+                        if wild else "no day swings beyond ±300%"))
+    neg = [f"{n} {d.date:%d %b}" for n, c in chans.items() for d in c.daily
+           if (d.gmv or 0) < 0 or (d.units or 0) < 0 or (d.ad_spend or 0) < 0]
+    out.append(Advisory("WARN" if neg else "OK", "Negative daily cells",
+                        "; ".join(neg[:8]) if neg else "none"))
+
+    # 5) A channel that gained an ad column (not in config.AD_CHANNELS).
+    extra = sorted(n for n, c in chans.items() if c.has_ad and n not in config.AD_CHANNELS)
+    out.append(Advisory("INFO" if extra else "OK", "New ad-carrying channel",
+                        (", ".join(extra) + " — add to config.AD_CHANNELS to make it expected")
+                        if extra else "ad channels match config"))
+
+    # 6) Channels with nothing yet this month (reported as blank, not zero).
+    idle = sorted(n for n, c in chans.items() if c.days_with_data == 0)
+    out.append(Advisory("INFO" if idle else "OK", "Channels with no data this month",
+                        ", ".join(idle) if idle else "every channel has at least one day"))
+
+    # 7) Read-only guarantee: the source workbooks must be untouched by the run.
+    if ctx.fp_before:
+        after = source_fingerprint()
+        changed = [p for p, v in ctx.fp_before.items() if after.get(p) != v]
+        out.append(Advisory("WARN" if changed else "OK", "Sources unchanged (read-only)",
+                            ("MODIFIED during the run: " + ", ".join(changed)) if changed
+                            else f"{len(ctx.fp_before)} source file(s) byte-identical before/after"))
+    else:
+        out.append(Advisory("INFO", "Sources unchanged (read-only)",
+                            "fingerprint not captured for this run"))
+
+    # 8) The deliberately-dropped headers still exist in the sheet (rule is live).
+    if ctx.headers:
+        seen = {f for hdrs in ctx.headers.values() for _, f in hdrs}
+        dropped_hdrs = sorted(h for h, canon in config.FIELD_ALIASES.items()
+                              if canon in config.DROPPED_FIELDS and h in seen)
+        out.append(Advisory("OK" if dropped_hdrs else "INFO", "Dropped columns present in sheet",
+                            (", ".join(dropped_hdrs) + " — read and intentionally excluded")
+                            if dropped_hdrs else "none found in this month's tabs"))
+
+    # 9) History coverage for the month slicer.
+    if models:
+        out.append(Advisory("OK", "Months rendered",
+                            f"{len(models)} month(s): {models[0].month_label} … "
+                            f"{models[-1].month_label}"))
+    return out
+
+
 # --- runner -----------------------------------------------------------------
 def compute_freshness(model, diags=None) -> list[Freshness]:
     """Estimate-freshness audit for a given model (loads sheet diagnostics)."""
@@ -179,18 +580,31 @@ def compute_freshness(model, diags=None) -> list[Freshness]:
     return _freshness(model, diags, model.days_in_month)
 
 
-def run(html_path: Optional[Path] = None, model=None, diags=None):
+def run(html_path: Optional[Path] = None, model=None, diags=None, models=None,
+        ctx: Optional[EdgeContext] = None):
+    """Run every correctness layer (A-F) plus the advisory audits.
+
+    Returns (passed, results, freshness, advisories). `models` (all months) and
+    `ctx` (sheet-level facts) enable layers E/F; without them the check falls
+    back to the figure-level layers only.
+    """
     model = model or build_report()
     diags = diags if diags is not None else load_sheet_diagnostics()
+    ctx = ctx if ctx is not None else build_context()
     results: list[tuple[str, str, bool, str]] = []
     _layer_a_sheet_vs_model(model, diags, results)
     _layer_b_identities(model, results)
+    html_text = ""
     if html_path and Path(html_path).exists():
-        _layer_c_html(model, Path(html_path).read_text(encoding="utf-8"), results)
+        html_text = Path(html_path).read_text(encoding="utf-8")
+        _layer_c_html(model, html_text, results)
     _layer_d_parsing(model, results)
+    _layer_e_edges(model, ctx, results)
+    _layer_f_structure(models or [model], html_text, results, complete=bool(models))
     freshness = _freshness(model, diags, model.days_in_month)
+    notes = advisories(model, models, ctx)
     passed = all(ok for _, _, ok, _ in results)
-    return passed, results, freshness
+    return passed, results, freshness, notes
 
 
 def print_report(results) -> None:
@@ -206,6 +620,13 @@ def print_report(results) -> None:
     print(f"\nQC: {ok}/{total} checks passed", "✔" if ok == total else "✗ FAILURES ABOVE")
 
 
+def print_advisories(notes: list[Advisory]) -> None:
+    icon = {"OK": "✔", "WARN": "⚠", "INFO": "·"}
+    print("\n----- SANITY ADVISORIES (never block the publish) -----")
+    for a in notes:
+        print(f"  {icon.get(a.level,'?')} {a.name:34} {a.message}")
+
+
 def print_freshness(freshness: list[Freshness]) -> None:
     icon = {"OK": "✔", "STALE": "⚠", "MISMATCH": "⚠", "NO_EXCEL": "·"}
     print("\n----- ESTIMATE FRESHNESS (our data-driven run-rate vs Excel's estimate) -----")
@@ -218,55 +639,142 @@ def print_freshness(freshness: list[Freshness]) -> None:
         print("\n  ➜ Excel estimates are all up to date and match. ✔")
 
 
+_LAYER_TITLES = [
+    ("A", "Excel Total-row vs output (reconciliation)"),
+    ("B", "Internal identities (growth / run-rate / gap / totals)"),
+    ("C", "Output HTML carries every figure"),
+    ("D", "GMV column parsed for every active channel"),
+    ("E", "Business edge cases (lag, roll-up, merge, no-bluffing)"),
+    ("F", "Page structure (months, daily tables, trend)"),
+]
+
+
+def _recon_table(model, diags) -> list[str]:
+    """Side-by-side Excel (the sheet's own Total row) vs output, per channel —
+    the numbers check, in the daily mail."""
+    hdr = (f"  {'Channel':<18}{'metric':<7}{'EXCEL (sheet Total)':>21}"
+           f"{'OUTPUT (report)':>18}{'diff':>12}  verdict")
+    lines = [hdr, "  " + "-" * (len(hdr) - 2)]
+    for s in model.sections:
+        for c in s.channels:
+            d = diags.get(c.name)
+            rows = [("GMV", c.gmv_mtd, d.total_gmv if d else None),
+                    ("LM", c.lm_mtd, d.total_lm if d else None),
+                    ("units", c.units_mtd, d.total_units if d else None)]
+            if c.has_ad:
+                rows.append(("ad", c.ad_mtd, d.total_ad if d else None))
+            for metric, mine, sheet in rows:
+                if sheet is None:
+                    lines.append(f"  {c.name:<18}{metric:<7}{'(no cell in sheet)':>21}"
+                                 f"{mine:>18,.0f}{'-':>12}  n/a")
+                    continue
+                diff = mine - sheet
+                lines.append(f"  {c.name:<18}{metric:<7}{sheet:>21,.0f}{mine:>18,.0f}"
+                             f"{diff:>12,.0f}  {'MATCH' if _close(mine, sheet) else 'MISMATCH'}")
+    g = model.grand
+    lines += ["  " + "-" * (len(hdr) - 2),
+              f"  {'GRAND TOTAL':<18}{'GMV':<7}{'':>21}{g.gmv_mtd:>18,.0f}",
+              f"  {'':<18}{'LM':<7}{'':>21}{g.lm_mtd:>18,.0f}",
+              f"  {'':<18}{'est':<7}{'':>21}{g.estimate:>18,.0f}",
+              f"  {'':<18}{'gap':<7}{'':>21}{g.gap:>18,.0f}"]
+    return lines
+
+
 def summary_text(results, freshness: list[Freshness], conflicts=None,
-                 month_label: str = "") -> str:
-    """Plain-text QC report for saving / the daily email. Covers: overall
-    pass/fail, any failures, the Excel-vs-output reconciliation and parsing
-    completeness (both drive pass/fail), cross-sheet mismatches, and estimate
-    freshness (advisory)."""
+                 month_label: str = "", model=None, diags=None,
+                 notes: "list[Advisory] | None" = None, generated=None) -> str:
+    """Plain-text QC report for saving / the daily email. Covers, in order:
+    the verdict, per-layer tallies, the Excel-vs-output number reconciliation,
+    any failures, the edge-case rules that were verified, cross-sheet
+    mismatches, estimate freshness, and the sanity advisories."""
     total, ok = len(results), sum(1 for _, _, o, _ in results if o)
-    # per-layer tallies
     layers: dict[str, list] = {}
     for layer, name, okk, detail in results:
         layers.setdefault(layer, []).append((name, okk, detail))
+
     def tally(prefix):
         items = [i for lyr, it in layers.items() if lyr.startswith(prefix) for i in it]
         return sum(1 for _, o, _ in items if o), len(items)
 
-    a_ok, a_n = tally("A")   # Excel Total-row vs output (reconciliation)
-    d_ok, d_n = tally("D")   # parsing completeness
     head = "ALL GOOD" if ok == total else "FAILURES PRESENT — DO NOT TRUST NUMBERS"
     lines = [
         f"DAILY QC VALIDATION{(' — ' + month_label) if month_label else ''}",
+        (f"Built {generated:%d %b %Y, %H:%M} IST" if generated else ""),
         f"Overall: {ok}/{total} checks passed  [{head}]",
         "",
-        f"  Excel Total-row vs output (reconciliation): {a_ok}/{a_n} channels reconcile",
-        f"  GMV column parsed for every active channel:  {d_ok}/{d_n} ok",
+        "WHAT WAS CHECKED",
     ]
+    for prefix, title in _LAYER_TITLES:
+        l_ok, l_n = tally(prefix)
+        if l_n:
+            lines.append(f"  [{'OK' if l_ok == l_n else 'FAIL'}] {title}: {l_ok}/{l_n}")
+    if model is not None:
+        g = model.grand
+        lines += ["",
+                  f"HEADLINE  MTD GMV {fmt.gmv_auto(g.gmv_mtd)} · {fmt.pct(g.growth)} vs LM · "
+                  f"estimate {fmt.gmv_auto(g.estimate)} · gap {fmt.gmv_auto(g.gap)}"
+                  + (f" · data as of {model.as_of:%d %b %Y}" if model.as_of else "")]
+
     fails = [(lyr, n, dt) for lyr, its in layers.items() for n, o, dt in its if not o]
     if fails:
-        lines += ["", "FAILURES:"]
+        lines += ["", "FAILURES (must be fixed before the numbers are trusted):"]
         lines += [f"  [{lyr}] {n} — {dt}" for lyr, n, dt in fails]
 
-    lines += ["", "Cross-sheet check (QC sheet vs Marketplace sheet, same month):"]
+    if model is not None and diags is not None:
+        lines += ["", "NUMBERS — EXCEL vs OUTPUT (figures in ₹; Excel = the sheet's own "
+                  "Total row)"] + _recon_table(model, diags)
+
+    # Edge cases: name the rules that were verified, so the mail is evidence.
+    e_items = layers.get("E edge cases", [])
+    f_items = layers.get("F structure", [])
+    if e_items or f_items:
+        e_ok, e_n = tally("E")
+        f_ok, f_n = tally("F")
+        lines += ["", f"EDGE CASES ({e_ok}/{e_n}) and PAGE STRUCTURE ({f_ok}/{f_n}) — rules verified:",
+                  "  - Sub-channel roll-up: Amazon ~ Amazon Core + Amazon NOW+Fresh (GMV & LM); "
+                  "the parts get no daily table of their own, only the contribution strip.",
+                  "  - T-2 lag (Amazon GMV): the pending tail stays BLANK, never 0, and a blank "
+                  "day never renders a growth figure — so a lag is never read as a drop.",
+                  "  - Ad Sales: every channel expected to carry an ad column still does "
+                  f"({', '.join(sorted(config.AD_CHANNELS))}); Blinkit/Amazon ad is T-2.",
+                  "  - Shopify GMV = gross 'Value'; 'Total Sale' (net) and 'Dolchi' are read "
+                  "and deliberately dropped, never mixed into GMV.",
+                  "  - Two-sheet merge OVERWRITES, never sums: each channel's GMV equals one "
+                  "sheet's figure; a disagreement withholds the channel instead of guessing.",
+                  "  - No bluffing: no channel shows a figure without a day of data behind it; "
+                  "no negative MTD, no future-dated GMV, dates unique/ascending/inside the month.",
+                  "  - Run-rate divisor is each platform's OWN latest data day (Amazon T-2 "
+                  "divides by fewer days than quick commerce).",
+                  "  - Stray sheet groups ('Total', 'xx') never become channels; every channel "
+                  "the sheets carry reaches the output (or is a declared conflict).",
+                  "  - Page: one pane + one dropdown option per month, one daily table per "
+                  "daily platform, freshness card, and a trend series that agrees with the model."]
+
+    lines += ["", "CROSS-SHEET CHECK (Quick Commerce sheet vs Marketplace & D2C sheet, same month):"]
     if conflicts:
         lines += [f"  MISMATCH (left blank in output, needs reconcile): {c}" for c in conflicts]
     else:
         lines += ["  No mismatches — where both sheets carry a channel, values agree."]
 
-    lines += ["", "Estimate freshness (our data-driven run-rate vs Excel's estimate cell):"]
+    lines += ["", "ESTIMATE FRESHNESS (our data-driven run-rate vs Excel's estimate cell):"]
     tag = {"OK": "[OK]", "STALE": "[STALE]", "MISMATCH": "[STALE]", "NO_EXCEL": "[--]"}
     for f in freshness:
         lines.append(f"  {tag.get(f.status,'[?]')} {f.channel}: {f.message}")
     stale = [f.channel for f in freshness if f.status in ("STALE", "MISMATCH")]
-    lines += ["", ("EXCEL NEEDS UPDATE (day-count not refreshed): " + ", ".join(stale))
-              if stale else "Excel estimates are all up to date and match."]
-    return "\n".join(lines)
+    lines += [("  => EXCEL NEEDS UPDATE (day-count not refreshed): " + ", ".join(stale))
+              if stale else "  => Excel estimates are all up to date and match."]
+
+    if notes:
+        lines += ["", "SANITY ADVISORIES (informational — never block the publish):"]
+        tg = {"OK": "[OK]", "WARN": "[WARN]", "INFO": "[INFO]"}
+        lines += [f"  {tg.get(a.level,'[?]')} {a.name}: {a.message}" for a in notes]
+    return "\n".join(l for l in lines if l is not None)
 
 
 if __name__ == "__main__":
     html = config.OUTPUT_DIR / "index.html"
-    passed, results, freshness = run(html if html.exists() else None)
+    passed, results, freshness, notes = run(html if html.exists() else None)
     print_report(results)
     print_freshness(freshness)
+    print_advisories(notes)
     raise SystemExit(0 if passed else 1)

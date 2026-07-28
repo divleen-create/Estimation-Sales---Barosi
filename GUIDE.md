@@ -66,23 +66,62 @@ Want it to stop instead of producing a PNG when QC fails? `python main.py --stri
 
 ## 3. What the QC self-check verifies
 
-`qc.py` runs automatically inside `main.py` (or on its own: `python qc.py`). Three
-independent layers, so a mistake in one place is caught by another:
+`qc.py` runs automatically inside `main.py` (or on its own: `python qc.py`). Six
+independent layers, so a mistake in one place is caught by another. All six drive
+**pass/fail** — `--strict` (used in the cloud) refuses to publish on any failure.
 
 - **A — sheet → model:** re-reads the sheet and recomputes every channel's GMV,
-  LM, units, growth, estimate and gap; they must match what the report computed.
-- **B — identities:** growth/estimate/gap formulas hold; section totals = sum of
-  channels; grand total = sum of sections.
+  LM, units and Ad Sales; they must equal the sheet's **own Total-row cells**.
+  Ad Contri is also checked against the sheet's own Ad/Value ratio where it exists.
+- **B — identities:** growth / run-rate / gap / ad-contri formulas hold; the
+  run-rate divisor is each platform's **own** latest data day; every MTD figure
+  equals the sum of the daily cells behind it; section totals = Σ channels; grand
+  total = Σ sections for GMV, LM, units, ad, estimate **and** gap.
 - **C — model → HTML:** the HTML actually contains the headline figures, every
   channel's GMV, and every daily date — and does **not** show excluded channels.
 - **D — parsing completeness:** every channel with activity must have a GMV column
   parsed (flags `units present but 0 GMV days` — the signature of a month-labelled
   header being dropped, e.g. the Zepto Mar'26 bug).
+- **E — business edge cases:** the agreed rules, each as a check —
+  - Amazon ≈ Amazon Core + Amazon NOW+Fresh on GMV **and** LM (5% tolerance), and
+    the parts stay sub-channels (no daily table of their own).
+  - **T-2 lag** (Amazon GMV): the pending tail stays **blank, never 0**, and a blank
+    day never carries a growth figure — a lag can't read as a drop.
+  - Every channel expected to carry **Ad Sales** still does (`config.AD_CHANNELS`);
+    losing that column would silently show ad 0.
+  - **Shopify GMV = gross `Value`**; `Total Sale` (net) and `Dolchi` are read and
+    deliberately dropped — a leak into GMV fails.
+  - **Two-sheet merge overwrote, never summed:** each channel's GMV equals *one*
+    sheet's figure; a conflicted channel must be **withheld** from the output.
+  - **No bluffing:** no figure without a day of data behind it, no negative MTD,
+    no future-dated GMV, dates unique/ascending/inside the reporting month.
+  - No stray sheet group (`Total`, `xx`) became a channel; conversely every channel
+    the sheets carry reached the output (or is a declared conflict).
+  - `days_in_month` matches the calendar and "Data as of" = the latest date anywhere.
+- **F — page structure:** one pane + one dropdown option per month; one daily table
+  per daily platform (sub-channels get none); the Amazon contribution strip; the
+  freshness card; a pending-month note when applicable; and a **trend dataset** that
+  parses, has 12 slots per year, covers every daily platform and whose current-month
+  values equal the model's.
 - **Cross-sheet check:** where both source sheets carry the same channel for a
   month, their GMV totals must agree (see §3b).
 
+Two audits are **advisory** and never block the publish:
+
+- **Estimate freshness** — our run-rate vs Excel's estimate cell and the day-count
+  baked into its formula (catches "nobody updated the /26 to /27").
+- **Sanity advisories** — per-platform data freshness vs the expected lag, an ad T-2
+  tail typed as `0` instead of left blank, ad-contri >25% and daily growth beyond
+  ±300%, negative daily cells, a channel that newly gained ads, channels with no
+  data yet this month, the **read-only guarantee** (source workbooks byte-identical
+  before/after the run), and — for lag platforms — the reported growth beside the
+  **like-for-like** growth over only the days that have GMV.
+
 You want `QC: N/N checks passed ✔` before sending. The full QC report is saved to
-`output/index_qc_summary.txt` and (in the cloud) **emailed daily** to divleen@barosi.in.
+`output/index_qc_summary.txt` and (in the cloud) **emailed daily** to
+divleen@barosi.in — the mail body carries the whole thing, including a per-channel
+**Excel-vs-output** table (sheet Total row │ report │ diff │ MATCH), and the subject
+line shows the verdict (`473/473 checks passed [ALL GOOD]`).
 
 ## 3a. How the two source sheets are read & merged
 Column headers in the sheets are inconsistent, so field detection is tolerant
@@ -192,6 +231,16 @@ different setup). The scheduled task leaves `output\index.png` ready to forward.
   sheet layout may have changed (a new column/channel). Check `config.py` aliases.
 - **QC `✗` on layer C:** the HTML didn't contain an expected figure — usually a
   formatting change; re-run `python main.py`.
+- **QC `✗` on layer D/E:** a data or rule problem, not cosmetic. Read the failure
+  line: `GMV parsed` → a header was renamed (add it to `config.py`); `Σ sub-channels`
+  → the Amazon split no longer describes Amazon; `merge kept one sheet` → the two
+  sheets diverged; `tail is pending, not zero` → someone typed 0 into a T-2 day;
+  `no dropped column parsed` → `Total Sale`/`Dolchi` leaked into GMV.
+- **QC `✗` on layer F:** the page didn't render what the model holds (a month pane,
+  daily table or trend series is missing) — re-run; if it persists it's a
+  `render_html.py` regression.
+- **`⚠` advisories are not failures:** late platform data, ad-contri outliers and a
+  stale Excel day-count are flagged for a human, and the report still publishes.
 - **PNG is blank / clipped at the bottom:** increase `height` in
   `render_image.py` (`html_to_png(..., height=…)`); it auto-crops the extra.
 - **`₹` looks wrong in the console:** cosmetic only (Windows console encoding);
@@ -255,11 +304,14 @@ cron-job.org  ──11:30 IST──▶  GitHub API (workflow_dispatch)
   or the daily trigger stops.
 
 ### Data-integrity guarantee
-The build runs `--strict`: if the numbers don't reconcile against the sheet's own
-Total row (QC layers A/B/C), the run **fails and does not publish** — the last good
-report stays up and GitHub emails you the failure. So a *published* report has always
-reconciled with the sheet. (The estimate-freshness/day-count check stays advisory and
-never blocks.)
+The build runs `--strict`: if anything in QC layers **A–F** fails — the numbers not
+reconciling against the sheet's own Total row, a broken identity, a missing figure in
+the HTML, a dropped GMV column, a violated business rule (T-2 tail, sub-channel
+roll-up, two-sheet merge, no-bluffing) or a page that doesn't match the model — the
+run **fails and does not publish**. The last good report stays up, GitHub emails you
+the failure, and the QC mail still goes out saying why. So a *published* report has
+always reconciled with the sheet. (Estimate freshness and the sanity advisories are
+advisory and never block.)
 
 ### Common tasks
 - **Change the daily time:** edit the schedule in the **cron-job.org** job (time is in
@@ -314,8 +366,12 @@ To place one global chart between the two blocks, each month is split into a `_p
 ### Email alerts (QC + mismatch)
 Two workflow email steps send to **divleen@barosi.in** (both skip silently until the
 SMTP secrets are set, so the report keeps publishing meanwhile):
-- **Daily QC report** — attaches `output/index_qc_summary.txt` every run (runs even if
-  the build fails, so you always get the validation).
+- **Daily QC report** — the full validation in the **email body** *and* attached as
+  `output/index_qc_summary.txt`, every run (even if the build fails, so you always get
+  the validation). Contents: the verdict (also in the subject line), a per-layer tally,
+  the headline numbers, the **per-channel Excel-vs-output table** (sheet Total row │
+  report │ diff │ MATCH), any failures, the edge-case rules that were verified, the
+  cross-sheet check, estimate freshness and the sanity advisories.
 - **Mismatch alert** — fires only when `output/sheet_conflicts.txt` exists (two sheets
   disagreed; that channel was left blank).
 - **Setup (one time):** add repo secrets `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`,

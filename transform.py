@@ -81,6 +81,10 @@ class ReportModel:
     worst_channel: Optional[str]
     pending_note: Optional[str] = None
     merge_conflicts: list = field(default_factory=list)
+    # True when link_previous() filled this month's LM baseline from the actual
+    # previous month (its own in-tab LM column was blank). The current month is
+    # never linked, so QC's "LM = Σ daily LM cells" identity only applies there.
+    lm_linked: bool = False
 
 
 def _safe_growth(gmv: float, lm: float) -> Optional[float]:
@@ -204,6 +208,7 @@ def link_previous(models: list[ReportModel]) -> None:
         prev = by_ym.get(_prev_ym(m.year, m.month))
         if not prev:                           # earliest month -> no baseline
             continue
+        m.lm_linked = True
         prev_ch = {c.name: c for s in prev.sections for c in s.channels}
         prev_day = {(c.name, d.date.day): d.gmv
                     for s in prev.sections for c in s.channels

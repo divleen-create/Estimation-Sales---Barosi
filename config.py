@@ -97,6 +97,23 @@ LAG_DAYS = {"Amazon": 2}
 # ad-spend column is handled correctly if/when it is surfaced in the report.
 AD_LAG_DAYS = {"Amazon": 2, "Blinkit": 2}
 
+# Channels that are EXPECTED to carry an Ad Sales column. If one of these ever
+# loses its ad column (header renamed / block moved), the report would silently
+# show Ad Sales 0 — QC layer E fails on that. A channel gaining ads is only an
+# advisory (add it here to make it expected).
+AD_CHANNELS = {"Blinkit", "Big Basket", "Swiggy", "Zepto", "Amazon"}
+
+# Source columns deliberately parsed-and-dropped (not part of the leadership
+# view). Shopify: 'Total Sale' is net of cancellations/discounts and 'Dolchi' is
+# a sub-brand split — GMV must stay the gross 'Value' column. QC layer E proves
+# these never reach the model.
+DROPPED_FIELDS = {"total_sale", "dolchi"}
+
+# Tolerance for the sub-channel roll-up identity (parent ~ sum of its parts).
+# Amazon = Core + NOW+Fresh; small residual is expected from rounding/other
+# sub-lines, a large one means the split no longer describes the parent.
+ROLLUP_TOL = 0.05          # 5%
+
 # --- Data-freshness note ----------------------------------------------------
 # Expected data lag per platform (days behind the reference date) for the
 # freshness note. Anything staler than this is flagged as behind/missing.

@@ -444,6 +444,69 @@ def load_channels(period: "Period | None" = None) -> tuple[list[Channel], Period
     return chans, period
 
 
+def parsed_columns(period: "Period | None" = None) -> dict[str, dict[str, dict[str, int]]]:
+    """Which columns each sheet actually contributed, per channel:
+    {"QC": {channel: {field: col}}, "MKT": {...}}. QC uses this to prove that
+    dropped columns really were dropped (Shopify 'Total Sale'/'Dolchi') and that
+    every channel with activity got a GMV column."""
+    qc_src, mkt_src = _sources()
+    period = period or resolve_period(qc_src, mkt_src)
+    out: dict[str, dict[str, dict[str, int]]] = {"QC": {}, "MKT": {}}
+    for key, path, tab in (("QC", qc_src, period.tab_qc), ("MKT", mkt_src, period.tab_mkt)):
+        if not tab:
+            continue
+        ws = _load_wb(path, data_only=True)[tab]
+        out[key] = _column_map(ws, parse_period_from_name(tab))
+    return out
+
+
+def raw_headers(period: "Period | None" = None) -> dict[str, list[tuple[str, str]]]:
+    """Every (group, field-header) pair in row 1-2 of each sheet, before any
+    filtering — so QC can assert that skipped headers ('Total Sale', 'Dolchi',
+    'xx', 'Total') exist in the sheet yet never reached the model."""
+    qc_src, mkt_src = _sources()
+    period = period or resolve_period(qc_src, mkt_src)
+    out: dict[str, list[tuple[str, str]]] = {"QC": [], "MKT": []}
+    for key, path, tab in (("QC", qc_src, period.tab_qc), ("MKT", mkt_src, period.tab_mkt)):
+        if not tab:
+            continue
+        ws = _load_wb(path, data_only=True)[tab]
+        groups = _group_map_from_row1(ws)
+        out[key] = [(_norm(groups.get(c)), _norm(ws.cell(2, c).value))
+                    for c in range(2, ws.max_column + 1)]
+    return out
+
+
+def cross_sheet_gmv(period: "Period | None" = None) -> dict[str, dict[str, Optional[float]]]:
+    """Per-channel GMV total as each sheet reports it (before the merge):
+    {channel: {"QC": x|None, "MKT": y|None}}. Lets QC prove the merge OVERWROTE
+    (result == one side) and never summed."""
+    qc_src, mkt_src = _sources()
+    period = period or resolve_period(qc_src, mkt_src)
+    out: dict[str, dict[str, Optional[float]]] = {}
+    for key, path, tab in (("QC", qc_src, period.tab_qc), ("MKT", mkt_src, period.tab_mkt)):
+        if not tab:
+            continue
+        for ch in parse_tab(path, tab):
+            out.setdefault(ch.name, {"QC": None, "MKT": None})
+            out[ch.name][key] = _channel_gmv(ch) if _has_gmv(ch) else None
+    return out
+
+
+def source_fingerprint() -> dict[str, tuple[float, int]]:
+    """(mtime, size) of the files we read. QC compares before/after the run to
+    prove the read-only rule held — nothing was written to a source."""
+    qc_src, mkt_src = _sources()
+    fp: dict[str, tuple[float, int]] = {}
+    for p in (qc_src, mkt_src):
+        try:
+            st = os.stat(p)
+            fp[str(p)] = (st.st_mtime, st.st_size)
+        except OSError:
+            pass
+    return fp
+
+
 def load_sheet_diagnostics(period: "Period | None" = None) -> dict[str, SheetChannelDiag]:
     """Sheet Total-row values + estimate formulas for every channel, for the
     given period (or the resolved latest). Used by QC as ground truth."""
