@@ -65,6 +65,19 @@ def main() -> None:
     html_path = write_html_multi(models, generated, freshness=freshness)
     print(f"HTML : {html_path}")
 
+    # Cross-sheet GMV mismatches (both sheets have the channel/month but disagree).
+    # Values were NOT summed — the richer series is kept — but flag it for an alert.
+    conflicts = [c for m in models for c in m.merge_conflicts]
+    conflict_file = config.OUTPUT_DIR / "sheet_conflicts.txt"
+    if conflicts:
+        print("\n⚠ CROSS-SHEET GMV MISMATCHES (QC vs MKT sheet):")
+        for c in conflicts:
+            print(f"   {c}")
+            print(f"::warning title=Sheet mismatch::{c}")  # surfaces in GitHub Actions
+        conflict_file.write_text("\n".join(conflicts), encoding="utf-8")
+    elif conflict_file.exists():
+        conflict_file.unlink()
+
     # 2) QC self-check: sheet→model, identities, model→html (+ estimate audit)
     passed, results, freshness = qc.run(html_path, model=model, diags=diags)
     qc.print_report(results)

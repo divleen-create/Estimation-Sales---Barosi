@@ -80,6 +80,7 @@ class ReportModel:
     best_channel: Optional[str]
     worst_channel: Optional[str]
     pending_note: Optional[str] = None
+    merge_conflicts: list = field(default_factory=list)
 
 
 def _safe_growth(gmv: float, lm: float) -> Optional[float]:
@@ -179,6 +180,7 @@ def build_report(period=None) -> ReportModel:
         grand=grand, best_channel=best.name if best else None,
         worst_channel=worst.name if worst else None,
         pending_note=period.pending_note,
+        merge_conflicts=list(period.conflicts),
     )
 
 

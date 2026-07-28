@@ -87,10 +87,41 @@ def _group_map_from_row1(ws) -> dict[int, str]:
     return col_group
 
 
-def _column_map(ws) -> dict[str, dict[str, int]]:
+def _prev_month_names(ym) -> set:
+    """Lower-case name + 3-letter abbrev of the month BEFORE ym, e.g.
+    (2026, 3) -> {'february', 'feb'}. Used to spot a 'Feb GMV'-style LM header."""
+    if not ym:
+        return set()
+    _, m = ym
+    pm = 12 if m == 1 else m - 1
+    full = calendar.month_name[pm].lower()
+    return {full, full[:3]}
+
+
+def _field_of(header: str, prev_names: set) -> Optional[str]:
+    """Map a row-2 header to a canonical field, tolerant of month-labelled
+    variants some tabs use (e.g. 'March GMV', 'Feb GMV', 'March Ad sales')
+    instead of the standard 'Value' / 'LM GMV' / 'Ad sales'."""
+    h = _norm(header)
+    if not h:
+        return None
+    if "unit" in h:
+        return "units"
+    if "ad" in h:                                  # ad sales / ads sales / <month> ad sales
+        return "ad_spend"
+    if "gmv" in h or "value" in h:                  # 'Value', 'Total Value', 'March GMV'
+        if "lm" in h or "last" in h or any(n in h for n in prev_names):
+            return "lm_gmv"                         # 'LM GMV', 'Last Month GMV', prev-month GMV
+        return "gmv"
+    return config.FIELD_ALIASES.get(h)              # total sale/dolchi -> skipped by caller
+
+
+def _column_map(ws, ym=None) -> dict[str, dict[str, int]]:
     """channel display name -> {field_name: column_index}, from rows 1-2.
-    Skips Total/xx/excluded channels and keeps only units/gmv/lm_gmv/ad_spend."""
+    Skips Total/xx/excluded channels and keeps only units/gmv/lm_gmv/ad_spend.
+    `ym` (year, month) lets month-labelled GMV headers be classified correctly."""
     col_group = _group_map_from_row1(ws)
+    prev_names = _prev_month_names(ym)
     channels: dict[str, dict[str, int]] = {}
     for c in range(2, ws.max_column + 1):  # col 1 is DATE
         grp = _norm(col_group.get(c))
@@ -99,7 +130,7 @@ def _column_map(ws) -> dict[str, dict[str, int]]:
         display = config.CHANNEL_ALIASES.get(grp)
         if display is None or display in config.EXCLUDED_CHANNELS:
             continue
-        fld = config.FIELD_ALIASES.get(_norm(ws.cell(2, c).value))
+        fld = _field_of(ws.cell(2, c).value, prev_names)
         if fld in (None, "dolchi", "total_sale"):
             continue
         channels.setdefault(display, {})[fld] = c
@@ -125,7 +156,7 @@ def parse_tab(path, tab: str) -> list[Channel]:
     and excluded channels). Column mapping is derived from rows 1-2 so it
     survives layout differences between the two workbooks."""
     ws = _load_wb(path, data_only=True)[tab]
-    channels = _column_map(ws)
+    channels = _column_map(ws, parse_period_from_name(tab))
     date_rows = _date_rows(ws)
 
     result: list[Channel] = []
@@ -167,12 +198,12 @@ def sheet_diagnostics(path, tab: str) -> dict[str, SheetChannelDiag]:
     so we can tell whether the sheet's day-count is stale."""
     wsv = _load_wb(path, data_only=True)[tab]
     wsf = _load_wb(path, data_only=False)[tab]
-    channels = _column_map(wsv)
+    ym = parse_period_from_name(tab)
+    channels = _column_map(wsv, ym)
     rows = _date_rows(wsv)
     if not rows:
         return {}
     last = rows[-1][0]
-    ym = parse_period_from_name(tab)
     dim = calendar.monthrange(*ym)[1] if ym else 31  # days in month (estimate mult)
 
     # Totals row = the row just below the daily block with the most numeric
@@ -250,6 +281,7 @@ class Period:
     tab_qc: Optional[str]   # may be None for months only one sheet covers
     tab_mkt: Optional[str]
     pending_note: Optional[str] = None  # e.g. newer month exists but is empty
+    conflicts: list = field(default_factory=list)  # cross-sheet GMV mismatches
 
 
 def parse_period_from_name(name: str) -> Optional[tuple[int, int]]:
@@ -359,17 +391,58 @@ def list_periods() -> list[Period]:
     return out
 
 
+def _channel_gmv(ch: "Channel") -> float:
+    return sum(r.gmv for r in ch.records if r.gmv is not None)
+
+
+def _has_gmv(ch: "Channel") -> bool:
+    return any(r.gmv is not None for r in ch.records)
+
+
+def _merge_channels(qc_list, mkt_list, label):
+    """Merge the two sheets for ONE month by OVERWRITE (never sum): one series
+    per channel, preferring the sheet that actually has GMV data. When BOTH
+    sheets have data for a channel but the totals disagree, record a conflict
+    (for an email alert) and keep the richer series."""
+    qc = {c.name: c for c in qc_list}
+    mkt = {c.name: c for c in mkt_list}
+    order = list(qc.keys()) + [n for n in mkt if n not in qc]
+    merged, conflicts = [], []
+    for name in order:
+        a, b = qc.get(name), mkt.get(name)
+        if a and b:
+            ad, bd = _has_gmv(a), _has_gmv(b)
+            if ad and bd:
+                ga, gb = _channel_gmv(a), _channel_gmv(b)
+                if abs(ga - gb) > max(1.0, 0.001 * max(abs(ga), abs(gb))):
+                    # Sheets disagree — do NOT guess. Blank this channel's numbers
+                    # for the month and alert; the user reconciles and re-runs.
+                    conflicts.append(f"{label} · {name}: QC ₹{ga:,.0f} vs MKT ₹{gb:,.0f}")
+                    for r in b.records:
+                        r.gmv = r.lm_gmv = r.ad_spend = None
+                    merged.append(b)
+                else:
+                    merged.append(b)          # values agree — keep either
+            elif ad:
+                merged.append(a)              # only QC has data
+            elif bd:
+                merged.append(b)              # only MKT has data
+            # neither sheet has GMV for this channel this month -> skip
+        elif a or b:
+            merged.append(a or b)             # present in just one sheet
+    return merged, conflicts
+
+
 def load_channels(period: "Period | None" = None) -> tuple[list[Channel], Period]:
-    """Return (channels, reporting Period). If `period` is given, load exactly
-    its tabs (either may be absent for single-sheet history months); else
-    auto-resolve to the latest month present in both sheets."""
+    """Return (channels, reporting Period). Both sheets are read for the month
+    and merged by OVERWRITE (prefer the sheet with data; never sum). If `period`
+    is given, load exactly its tabs; else auto-resolve to the latest month."""
     qc_src, mkt_src = _sources()
     period = period or resolve_period(qc_src, mkt_src)
-    chans: list[Channel] = []
-    if period.tab_qc:
-        chans += parse_tab(qc_src, period.tab_qc)
-    if period.tab_mkt:
-        chans += parse_tab(mkt_src, period.tab_mkt)
+    qc_list = parse_tab(qc_src, period.tab_qc) if period.tab_qc else []
+    mkt_list = parse_tab(mkt_src, period.tab_mkt) if period.tab_mkt else []
+    chans, conflicts = _merge_channels(qc_list, mkt_list, period.label)
+    period.conflicts = conflicts
     return chans, period
 
 

@@ -12,6 +12,8 @@ permissions:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    env:
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}   # used to gate the mismatch-email step
 
     steps:
       - name: Checkout repo
@@ -47,6 +49,27 @@ jobs:
         # --strict: abort (non-zero exit) if the numbers don't reconcile against the
         # sheet's OWN totals / internal identities, so discrepant data is never published.
         run: python main.py --no-image --strict
+
+      - name: Email on cross-sheet mismatch
+        # Fires only when the build wrote output/sheet_conflicts.txt (the two source
+        # sheets disagreed on a value; that channel was left blank in the report).
+        # Skips silently if SMTP secrets aren't configured.
+        if: ${{ hashFiles('output/sheet_conflicts.txt') != '' && env.SMTP_HOST != '' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from: Sales Report Bot <${{ secrets.SMTP_USERNAME }}>
+          to: divleen@barosi.in
+          subject: "⚠ Daily Sales Report — source-sheet value mismatch"
+          body: |
+            The two source sheets disagree on one or more values. Those channels were
+            left BLANK in the report for the affected month(s) — please reconcile the
+            sheets, then re-run the report. Details attached.
+          attachments: output/sheet_conflicts.txt
 
       - name: Commit and push updated report
         run: |
