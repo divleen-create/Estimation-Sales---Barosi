@@ -102,6 +102,10 @@ jobs:
             cp output/index_qc_summary.txt output/qc_email_body.txt
             echo "QC_VERDICT=BUILD FAILED (no QC summary)" >> $GITHUB_ENV
           fi
+          # HTML body (tables + colour). Fall back to the plain text if absent.
+          if [ ! -f output/index_qc_summary.html ]; then
+            printf '<p style="font:600 14px Arial;color:#a51f26">Daily QC validation could not be produced — the build failed before the QC step ran. Nothing new was published; the last good report stays live. Check the GitHub Actions log.</p>' > output/index_qc_summary.html
+          fi
 
       - name: Email daily QC report
         # Runs even if the build failed — so the daily validation always lands.
@@ -117,6 +121,9 @@ jobs:
           from: Sales Report Bot <${{ secrets.SMTP_USERNAME }}>
           to: divleen@barosi.in
           subject: "Daily Sales Report — QC validation: ${{ env.QC_VERDICT }}"
+          # html_body is what you read (headings, tables, colour-coded verdicts);
+          # body is the plain-text alternative for clients that refuse HTML.
+          html_body: file://output/index_qc_summary.html
           body: file://output/qc_email_body.txt
           attachments: output/index_qc_summary.txt
 

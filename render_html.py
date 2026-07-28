@@ -296,9 +296,13 @@ def _platform_daily_table(c: ChannelSummary, dim: int) -> str:
     </div>"""
 
 
-def _contrib_strip(sec: Section, parent: str) -> str:
+def _contrib_strip(sec: Section, parent: str, rollup=None) -> str:
     """A one-line contribution glance for a parent's sub-channels (share of the
-    parent's GMV), shown at the top of the parent's day-wise table."""
+    parent's GMV), shown at the top of the parent's day-wise table.
+
+    Also states which way the parent figure came about: built from the parts (the
+    sheet has no parent column) or entered in the sheet — in which case any
+    difference between the entered figure and Σ parts is shown as unattributed."""
     subs = [c for c in sec.channels
             if _PARENT_OF.get(c.name) == parent and c.name in config.SUBCHANNELS.get(parent, [])]
     p = next((c for c in sec.channels if c.name == parent), None)
@@ -308,8 +312,18 @@ def _contrib_strip(sec: Section, parent: str) -> str:
         f'<span class="cp"><b>{_e(s.name)}</b> {fmt.gmv_auto(s.gmv_mtd)} '
         f'· <span class="pos">{fmt.pct_plain(s.gmv_mtd / p.gmv_mtd)}</span></span>'
         for s in subs)
+    note = ""
+    if rollup is not None:
+        if rollup.derived:
+            note = (f'<span class="cp"><b>{_e(parent)} built from these parts</b> — '
+                    f'the sheets carry no {_e(parent)} column</span>')
+        elif abs(rollup.gap) > max(1.0, 0.005 * (rollup.entered_gmv or 1)):
+            note = (f'<span class="cp">Unattributed <b>{fmt.gmv_auto(rollup.gap)}</b> '
+                    f'({fmt.pct_plain(rollup.gap_pct or 0)}) — {_e(parent)} as entered '
+                    f'({fmt.gmv_auto(rollup.entered_gmv)}) minus its parts '
+                    f'({fmt.gmv_auto(rollup.parts_gmv)})</span>')
     return (f'<div class="contrib">Contribution to {_e(parent)} GMV '
-            f'({fmt.gmv_auto(p.gmv_mtd)}): {parts}</div>')
+            f'({fmt.gmv_auto(p.gmv_mtd)}): {parts}{note}</div>')
 
 
 def _daily_tables(sec: Section, dim: int) -> str:
@@ -436,7 +450,9 @@ def _daily_filter_card(m: ReportModel, dim: int) -> str:
     opts, panes = [], []
     for i, c in enumerate(chans):
         opts.append(f'<option value="{i}"{" selected" if i == 0 else ""}>{_e(c.name)}</option>')
-        strip = (_contrib_strip(sec_of[c.name], c.name) if c.name in config.SUBCHANNELS else "")
+        strip = (_contrib_strip(sec_of[c.name], c.name,
+                                next((r for r in m.rollups if r.parent == c.name), None))
+                 if c.name in config.SUBCHANNELS else "")
         hidden = "" if i == 0 else " hidden"
         panes.append(f'<div class="ptbl-pane" data-plat="{i}"{hidden}>{strip}'
                      f'{_platform_daily_table(c, dim)}</div>')

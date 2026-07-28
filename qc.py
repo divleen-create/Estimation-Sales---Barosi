@@ -74,8 +74,15 @@ def _today() -> _dt.date:
 
 # --- correctness layers -----------------------------------------------------
 def _layer_a_sheet_vs_model(model, diags, results):
+    # A parent we had to BUILD from its sub-channels has no Total-row cell of its
+    # own to reconcile against — layer E checks it against Σ parts instead.
+    built = {r.parent for r in model.rollups if r.derived}
     for s in model.sections:
         for c in s.channels:
+            if c.name in built:
+                results.append(("A sheet→model", f"{c.name} (derived)", True,
+                                "no sheet column — built from sub-channels, checked in E"))
+                continue
             d = diags.get(c.name)
             if not d or d.total_gmv is None:
                 results.append(("A sheet→model", f"{c.name}", False, "no sheet Total row found"))
@@ -208,19 +215,47 @@ def _layer_e_edges(model, ctx: EdgeContext, results):
 
     chans = {c.name: c for s in model.sections for c in s.channels}
     today = ctx.today or _today()
+    # Parents built from their sub-channels have no column of their own, so the
+    # sheet-column rules (ad column present, merge = one sheet) don't apply to them.
+    built = {r.parent for r in model.rollups if r.derived}
 
-    # 1) Sub-channel roll-up: the parent is (approximately) the sum of its parts,
-    #    and the parts never get a day-wise table of their own.
+    # 1) Sub-channel roll-up, both directions:
+    #    - parent column ENTERED in the sheet -> it is the number we report; the
+    #      parts only give the split, and parent ≈ Σ parts within ROLLUP_TOL.
+    #    - parent column ABSENT -> it was built by summing the parts, so parent
+    #      must equal Σ parts exactly.
+    #    Either way the parts stay sub-channels (no day-wise table of their own).
+    for r in model.rollups:
+        tol = REL_TOL if r.derived else config.ROLLUP_TOL
+        how = "derived from parts" if r.derived else f"entered; tol {tol:.0%}"
+        for key, pv, sv in (("GMV", r.entered_gmv, r.parts_gmv),
+                            ("LM", r.entered_lm, r.parts_lm)):
+            chk(f"{r.parent} {'=' if r.derived else '≈'} Σ sub-channels {key}",
+                _close(sv, pv, tol),
+                f"parts={sv:,.0f} parent={pv:,.0f} ({how})")
+        shares = [s for _, _, s in r.parts if s is not None]
+        chk(f"{r.parent} contribution shares are sane",
+            all(0 <= s <= 1.0001 for s in shares),
+            "; ".join(f"{n} {s*100:.1f}%" for n, _, s in r.parts if s is not None))
+        if r.derived:
+            # Built parent: every DAY must be the sum of that day's parts, and a
+            # day where all parts are blank must stay blank (no phantom zeros).
+            p = chans.get(r.parent)
+            part_ch = [chans[n] for n, _, _ in r.parts if n in chans]
+            bad_day, phantom = [], []
+            for cell in (p.daily if p else []):
+                vals = [d.gmv for x in part_ch for d in x.daily
+                        if d.date == cell.date and d.gmv is not None]
+                if vals and not _close(cell.gmv, sum(vals)):
+                    bad_day.append(f"{cell.date:%d %b}")
+                if not vals and cell.gmv is not None:
+                    phantom.append(f"{cell.date:%d %b}")
+            chk(f"{r.parent} daily = Σ parts per day", not bad_day,
+                f"off on: {', '.join(bad_day[:5])}")
+            chk(f"{r.parent} blank when all parts blank", not phantom,
+                f"phantom value on: {', '.join(phantom[:5])}")
     for parent, subs in config.SUBCHANNELS.items():
-        p, parts = chans.get(parent), [chans[s] for s in subs if s in chans]
-        if not p or not parts:
-            continue
-        for key, pv, sv in (("GMV", p.gmv_mtd, sum(x.gmv_mtd for x in parts)),
-                            ("LM", p.lm_mtd, sum(x.lm_mtd for x in parts))):
-            chk(f"{parent} ≈ Σ sub-channels {key}", _close(sv, pv, config.ROLLUP_TOL),
-                f"parts={sv:,.0f} parent={pv:,.0f} "
-                f"({'+'.join(x.name for x in parts)}; tol {config.ROLLUP_TOL:.0%})")
-        for x in parts:
+        for x in [chans[s] for s in subs if s in chans]:
             chk(f"{x.name} is a sub-channel (no own daily table)", x.cadence == "sub",
                 f"cadence={x.cadence}")
 
@@ -266,7 +301,7 @@ def _layer_e_edges(model, ctx: EdgeContext, results):
 
     # 4) Ad columns: every channel expected to carry Ad Sales still does. Losing
     #    one silently shows Ad Sales 0 — the same failure mode as the GMV bug.
-    for name in sorted(config.AD_CHANNELS & set(chans)):
+    for name in sorted(config.AD_CHANNELS & set(chans) - built):
         chk(f"{name} Ad Sales column present", chans[name].has_ad,
             f"ad_mtd={chans[name].ad_mtd:,.0f}")
 
@@ -287,7 +322,7 @@ def _layer_e_edges(model, ctx: EdgeContext, results):
     conflicted = _conflicted_names(model)
     for name, c in chans.items():
         pair = ctx.cross.get(name)
-        if not pair:
+        if not pair or name in built:      # a built parent is a sum by design
             continue
         sides = {k: v for k, v in pair.items() if v is not None}
         if not sides:
@@ -539,6 +574,20 @@ def advisories(model, models=None, ctx: Optional[EdgeContext] = None) -> list[Ad
                         (", ".join(extra) + " — add to config.AD_CHANNELS to make it expected")
                         if extra else "ad channels match config"))
 
+    # 5b) A parent built from its parts inherits only what the parts carry.
+    for r in getattr(model, "rollups", []):
+        if not r.derived:
+            continue
+        p = chans.get(r.parent)
+        out.append(Advisory("WARN", f"{r.parent} built from sub-channels",
+                            f"the sheets carry no {r.parent} column, so {r.parent} = "
+                            f"{' + '.join(n for n, _, _ in r.parts)} "
+                            f"({fmt.gmv_auto(r.parts_gmv)}); contribution split "
+                            + " · ".join(f"{n} {s*100:.1f}%" for n, _, s in r.parts
+                                         if s is not None)
+                            + ("" if (p and p.has_ad) else
+                               f" — no Ad Sales for {r.parent} (the parts have none)")))
+
     # 6) Channels with nothing yet this month (reported as blank, not zero).
     idle = sorted(n for n, c in chans.items() if c.days_with_data == 0)
     out.append(Advisory("INFO" if idle else "OK", "Channels with no data this month",
@@ -750,6 +799,22 @@ def summary_text(results, freshness: list[Freshness], conflicts=None,
                   "  - Page: one pane + one dropdown option per month, one daily table per "
                   "daily platform, freshness card, and a trend series that agrees with the model."]
 
+    if model is not None and model.rollups:
+        lines += ["", "SUB-CHANNEL ROLL-UP (parent vs the sum of its parts)"]
+        for r in model.rollups:
+            src = ("BUILT from its parts (no parent column in the sheets)" if r.derived
+                   else "ENTERED in the sheet (the entered figure is what we report)")
+            lines += [f"  {r.parent}: {src}",
+                      f"    entered/reported : {r.entered_gmv:>15,.0f}",
+                      f"    Σ parts          : {r.parts_gmv:>15,.0f}  "
+                      f"({' + '.join(n for n, _, _ in r.parts)})",
+                      f"    GAP (entered-Σ)  : {r.gap:>15,.0f}"
+                      + (f"  ({r.gap_pct*100:+.2f}% of {r.parent})" if r.gap_pct is not None else ""),
+                      f"    LM gap           : {r.lm_gap:>15,.0f}",
+                      "    split: " + " · ".join(
+                          f"{n} {fmt.gmv_auto(g)} = {s*100:.1f}%" if s is not None else f"{n} –"
+                          for n, g, s in r.parts)]
+
     lines += ["", "CROSS-SHEET CHECK (Quick Commerce sheet vs Marketplace & D2C sheet, same month):"]
     if conflicts:
         lines += [f"  MISMATCH (left blank in output, needs reconcile): {c}" for c in conflicts]
@@ -769,6 +834,229 @@ def summary_text(results, freshness: list[Freshness], conflicts=None,
         tg = {"OK": "[OK]", "WARN": "[WARN]", "INFO": "[INFO]"}
         lines += [f"  {tg.get(a.level,'[?]')} {a.name}: {a.message}" for a in notes]
     return "\n".join(l for l in lines if l is not None)
+
+
+# --- HTML version of the daily QC mail --------------------------------------
+_C = {  # (text, background) per state — inline styles, for email clients
+    "ok":   ("#0b6b34", "#e7f6ec"),
+    "fail": ("#a51f26", "#fdecec"),
+    "warn": ("#8a5a00", "#fff6e0"),
+    "info": ("#3f4b5b", "#eef1f5"),
+}
+_BRAND, _INK, _MUTED, _LINE = "#12608a", "#1a2430", "#5b6774", "#dfe5ea"
+_REPORT_URL = "https://divleen-create.github.io/Estimation-Sales---Barosi/"
+
+
+def _esc(s) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _chip(text, kind="ok") -> str:
+    fg, bg = _C.get(kind, _C["info"])
+    return (f'<span style="display:inline-block;padding:2px 8px;border-radius:10px;'
+            f'background:{bg};color:{fg};font:600 11px/1.6 Segoe UI,Arial,sans-serif;'
+            f'white-space:nowrap">{_esc(text)}</span>')
+
+
+def _tbl(head, rows, widths=None) -> str:
+    """Simple email-safe table: inline-styled th/td, zebra rows."""
+    ws = widths or [""] * len(head)
+    th = "".join(
+        f'<th style="text-align:{"right" if i else "left"};padding:7px 10px;'
+        f'background:{_BRAND};color:#fff;font:600 12px Segoe UI,Arial,sans-serif;'
+        f'border:0"{f" width={w}" if w else ""}>{_esc(h)}</th>'
+        for i, (h, w) in enumerate(zip(head, ws)))
+    body = []
+    for n, r in enumerate(rows):
+        bg = "#ffffff" if n % 2 else "#f7f9fb"
+        tds = "".join(
+            f'<td style="text-align:{"right" if i else "left"};padding:6px 10px;'
+            f'border-bottom:1px solid {_LINE};color:{_INK};'
+            f'font:{"600" if i == 0 else "400"} 12px Segoe UI,Arial,sans-serif">{cell}</td>'
+            for i, cell in enumerate(r))
+        body.append(f'<tr style="background:{bg}">{tds}</tr>')
+    return (f'<table cellpadding="0" cellspacing="0" border="0" width="100%" '
+            f'style="border-collapse:collapse;margin:6px 0 16px">'
+            f'<thead><tr>{th}</tr></thead><tbody>{"".join(body)}</tbody></table>')
+
+
+def _h2(text) -> str:
+    return (f'<div style="margin:22px 0 2px;font:700 14px Segoe UI,Arial,sans-serif;'
+            f'color:{_INK};border-left:4px solid {_BRAND};padding-left:8px">{_esc(text)}</div>')
+
+
+def _note(text) -> str:
+    return (f'<div style="font:400 11px Segoe UI,Arial,sans-serif;color:{_MUTED};'
+            f'margin:0 0 6px">{text}</div>')
+
+
+def summary_html(results, freshness: list[Freshness], conflicts=None, month_label: str = "",
+                 model=None, diags=None, notes: "list[Advisory] | None" = None,
+                 generated=None) -> str:
+    """The same daily validation as summary_text(), formatted as an HTML email:
+    headings, tables and colour-coded verdicts/highlights."""
+    total, ok = len(results), sum(1 for _, _, o, _ in results if o)
+    allgood = ok == total
+    layers: dict[str, list] = {}
+    for layer, name, okk, detail in results:
+        layers.setdefault(layer, []).append((name, okk, detail))
+
+    def tally(prefix):
+        items = [i for lyr, it in layers.items() if lyr.startswith(prefix) for i in it]
+        return sum(1 for _, o, _ in items if o), len(items)
+
+    fg, bg = _C["ok"] if allgood else _C["fail"]
+    out = [f'<div style="font-family:Segoe UI,Arial,sans-serif;max-width:900px;color:{_INK}">',
+           f'<div style="background:{_BRAND};color:#fff;padding:14px 16px;border-radius:6px 6px 0 0">'
+           f'<div style="font:700 18px Segoe UI,Arial,sans-serif">Daily Sales Report — QC validation</div>'
+           f'<div style="font:400 12px Segoe UI,Arial,sans-serif;opacity:.9">'
+           f'{_esc(month_label)}'
+           + (f' · built {generated:%d %b %Y, %H:%M} IST' if generated else '') + '</div></div>',
+           f'<div style="background:{bg};color:{fg};padding:12px 16px;'
+           f'font:700 15px Segoe UI,Arial,sans-serif;border:1px solid {_LINE};border-top:0">'
+           f'{"✔" if allgood else "✗"} {ok}/{total} checks passed — '
+           f'{"ALL GOOD" if allgood else "FAILURES PRESENT · DO NOT TRUST THE NUMBERS"}</div>',
+           f'<div style="border:1px solid {_LINE};border-top:0;border-radius:0 0 6px 6px;'
+           f'padding:4px 16px 16px">']
+
+    # Headline KPIs
+    if model is not None:
+        g = model.grand
+        kpis = [("MTD GMV", fmt.gmv_auto(g.gmv_mtd)),
+                ("vs last month", fmt.pct(g.growth)),
+                ("Run-rate estimate", fmt.gmv_auto(g.estimate)),
+                ("Gap to estimate", fmt.gmv_auto(g.gap)),
+                ("Data as of", f"{model.as_of:%d %b %Y}" if model.as_of else "–")]
+        cells = "".join(
+            f'<td style="padding:10px 12px;border:1px solid {_LINE};background:#f7f9fb">'
+            f'<div style="font:600 10px Segoe UI,Arial,sans-serif;color:{_MUTED};'
+            f'text-transform:uppercase;letter-spacing:.4px">{_esc(k)}</div>'
+            f'<div style="font:700 16px Segoe UI,Arial,sans-serif;color:'
+            f'{_C["ok"][0] if (k == "vs last month" and (g.growth or 0) >= 0) else _INK}">'
+            f'{_esc(v)}</div></td>' for k, v in kpis)
+        out.append(f'<table cellpadding="0" cellspacing="0" border="0" width="100%" '
+                   f'style="border-collapse:collapse;margin:14px 0 4px"><tr>{cells}</tr></table>')
+
+    # What was checked
+    out.append(_h2("What was checked"))
+    out.append(_note("All six layers are blocking — the cloud build refuses to publish "
+                     "if any of them fails."))
+    rows = []
+    for prefix, title in _LAYER_TITLES:
+        l_ok, l_n = tally(prefix)
+        if l_n:
+            rows.append([_esc(f"{prefix} — {title}"), f"{l_ok}/{l_n}",
+                         _chip("PASS" if l_ok == l_n else "FAIL",
+                               "ok" if l_ok == l_n else "fail")])
+    out.append(_tbl(["Layer", "Checks", "Result"], rows, ["", "90", "90"]))
+
+    # Failures first when present
+    fails = [(lyr, n, dt) for lyr, its in layers.items() for n, o, dt in its if not o]
+    if fails:
+        out.append(_h2("Failures — fix before trusting the numbers"))
+        out.append(_tbl(["Check", "Layer", "Detail"],
+                        [[_esc(n), _chip(lyr.split()[0], "fail"), _esc(dt)]
+                         for lyr, n, dt in fails]))
+
+    # Excel vs output
+    if model is not None and diags is not None:
+        out.append(_h2("Numbers — Excel vs output"))
+        out.append(_note('“Excel” is the source sheet’s <b>own Total row</b>; “Output” is what '
+                         'the report published. Figures in ₹.'))
+        rows = []
+        for s in model.sections:
+            for c in s.channels:
+                d = diags.get(c.name)
+                metrics = [("GMV", c.gmv_mtd, d.total_gmv if d else None),
+                           ("LM", c.lm_mtd, d.total_lm if d else None),
+                           ("Units", c.units_mtd, d.total_units if d else None)]
+                if c.has_ad:
+                    metrics.append(("Ad Sales", c.ad_mtd, d.total_ad if d else None))
+                for i, (metric, mine, sheet) in enumerate(metrics):
+                    name = _esc(c.name) if i == 0 else ""
+                    if sheet is None:
+                        rows.append([name, metric, "—", f"{mine:,.0f}", "—",
+                                     _chip("derived", "info")])
+                    else:
+                        good = _close(mine, sheet)
+                        rows.append([name, metric, f"{sheet:,.0f}", f"{mine:,.0f}",
+                                     f"{mine - sheet:,.0f}",
+                                     _chip("MATCH" if good else "MISMATCH",
+                                           "ok" if good else "fail")])
+        g = model.grand
+        rows.append([f'<b>GRAND TOTAL</b>', "GMV", "", f"<b>{g.gmv_mtd:,.0f}</b>", "",
+                     _chip(fmt.pct(g.growth), "ok" if (g.growth or 0) >= 0 else "fail")])
+        rows.append(["", "Estimate", "", f"{g.estimate:,.0f}", "", ""])
+        rows.append(["", "Gap", "", f"{g.gap:,.0f}", "", ""])
+        out.append(_tbl(["Channel", "Metric", "Excel (sheet Total)", "Output (report)",
+                         "Diff", "Verdict"], rows))
+
+    # Sub-channel roll-up
+    if model is not None and model.rollups:
+        out.append(_h2("Sub-channel roll-up — parent vs the sum of its parts"))
+        out.append(_note("When the sheet carries the parent column, the <b>entered</b> figure is "
+                         "what we report and the parts only give the split; the difference is "
+                         "shown as the gap. When the sheet has <b>only the parts</b>, the parent "
+                         "is built by summing them (gap 0 by construction)."))
+        rows = []
+        for r in model.rollups:
+            src = _chip("built from parts", "warn") if r.derived else _chip("entered in sheet", "ok")
+            big = r.gap_pct is not None and abs(r.gap_pct) > config.ROLLUP_TOL
+            rows.append([_esc(r.parent), src, f"{r.entered_gmv:,.0f}", f"{r.parts_gmv:,.0f}",
+                         f"<b>{r.gap:,.0f}</b>",
+                         _chip(f"{r.gap_pct*100:+.2f}%" if r.gap_pct is not None else "–",
+                               "fail" if big else ("info" if r.gap else "ok"))])
+            for n, gv, share in r.parts:
+                rows.append([f'&nbsp;&nbsp;↳ {_esc(n)}', "", f"{gv:,.0f}", "",
+                             _chip(f"{share*100:.1f}% of {r.parent}" if share is not None else "–",
+                                   "info"), ""])
+        out.append(_tbl([f"Parent / part", "Source", "Entered / parent", "Σ parts",
+                         "Gap (entered − Σ)", "Gap %"], rows))
+        for r in model.rollups:
+            if r.lm_gap:
+                out.append(_note(f"{_esc(r.parent)} LM gap: <b>{r.lm_gap:,.0f}</b> "
+                                 f"(LM entered {r.entered_lm:,.0f} vs Σ parts {r.parts_lm:,.0f})."))
+
+    # Cross-sheet
+    out.append(_h2("Cross-sheet check"))
+    if conflicts:
+        out.append(_tbl(["Mismatch (channel left blank in the report — reconcile the sheets)"],
+                        [[_esc(c)] for c in conflicts]))
+    else:
+        out.append(f'<div>{_chip("No mismatches", "ok")} '
+                   f'<span style="font:400 12px Segoe UI,Arial,sans-serif;color:{_MUTED}">'
+                   f'where both sheets carry a channel, the values agree.</span></div>')
+
+    # Estimate freshness
+    out.append(_h2("Estimate freshness — our run-rate vs Excel’s estimate cell"))
+    kind = {"OK": "ok", "STALE": "warn", "MISMATCH": "warn", "NO_EXCEL": "info"}
+    label = {"OK": "up to date", "STALE": "EXCEL STALE", "MISMATCH": "EXCEL STALE",
+             "NO_EXCEL": "no Excel cell"}
+    out.append(_tbl(["Channel", "Status", "Detail"],
+                    [[_esc(f.channel), _chip(label.get(f.status, "?"), kind.get(f.status, "info")),
+                      _esc(f.message)] for f in freshness]))
+    stale = [f.channel for f in freshness if f.status in ("STALE", "MISMATCH")]
+    if stale:
+        fgw, bgw = _C["warn"]
+        out.append(f'<div style="background:{bgw};color:{fgw};padding:10px 12px;border-radius:4px;'
+                   f'font:600 12px Segoe UI,Arial,sans-serif">⚠ Excel day-count needs updating: '
+                   f'{_esc(", ".join(stale))}</div>')
+
+    # Advisories
+    if notes:
+        out.append(_h2("Sanity advisories — informational, never block the publish"))
+        kmap = {"OK": "ok", "WARN": "warn", "INFO": "info"}
+        out.append(_tbl(["Check", "Status", "Detail"],
+                        [[_esc(a.name), _chip(a.level, kmap.get(a.level, "info")),
+                          _esc(a.message)] for a in notes]))
+
+    out.append(f'<div style="margin-top:18px;font:400 11px Segoe UI,Arial,sans-serif;'
+               f'color:{_MUTED};border-top:1px solid {_LINE};padding-top:10px">'
+               f'Report: <a href="{_REPORT_URL}" style="color:{_BRAND}">{_REPORT_URL}</a><br>'
+               f'Source sheets are read-only — this run never writes to them. '
+               f'The plain-text version of this validation is attached.</div>')
+    out.append("</div></div>")
+    return "".join(out)
 
 
 if __name__ == "__main__":

@@ -282,6 +282,7 @@ class Period:
     tab_mkt: Optional[str]
     pending_note: Optional[str] = None  # e.g. newer month exists but is empty
     conflicts: list = field(default_factory=list)  # cross-sheet GMV mismatches
+    derived: list = field(default_factory=list)    # parents built from sub-channels
 
 
 def parse_period_from_name(name: str) -> Optional[tuple[int, int]]:
@@ -431,6 +432,54 @@ def _merge_channels(qc_list, mkt_list, label):
     return merged, conflicts
 
 
+def _synthesize_parents(chans: list["Channel"], label: str) -> list[str]:
+    """Build a parent channel from its sub-channels when the sheet has no parent
+    column of its own.
+
+    Some tabs record only 'Amazon Core' and 'Amazon NOW + Fresh' without an
+    'Amazon' block. Rather than lose Amazon, sum the parts DAY BY DAY per field
+    (units / GMV / LM / ad) so the parent gets a real daily series — and so the
+    contribution split still has a denominator. A day where every part is blank
+    stays blank (the T-2 tail must not become 0). Mutates `chans` in place and
+    returns one note per parent it had to derive.
+
+    When the sheet DOES carry the parent column, it wins — the entered figure is
+    the source of truth and the parts only describe the split (the difference is
+    reported as the roll-up gap, see transform.Rollup).
+    """
+    by = {c.name: c for c in chans}
+    derived: list[str] = []
+    for parent, subs in config.SUBCHANNELS.items():
+        p = by.get(parent)
+        if p is not None and _has_gmv(p):
+            continue                      # entered parent wins
+        parts = [by[s] for s in subs if s in by and _has_gmv(by[s])]
+        if not parts:
+            continue                      # nothing to build from
+        rows_by_date: dict[_dt.date, list[DailyRecord]] = {}
+        for ch in parts:
+            for r in ch.records:
+                rows_by_date.setdefault(r.date, []).append(r)
+        recs = []
+        for d in sorted(rows_by_date):
+            rec = DailyRecord(date=d)
+            for fld in ("units", "gmv", "lm_gmv", "ad_spend"):
+                vals = [getattr(r, fld) for r in rows_by_date[d]
+                        if getattr(r, fld) is not None]
+                if vals:
+                    setattr(rec, fld, float(sum(vals)))
+            recs.append(rec)
+        built = Channel(name=parent, records=recs)
+        if p is None:
+            chans.append(built)
+        else:
+            chans[chans.index(p)] = built
+        derived.append(f"{label} · {parent} = Σ({' + '.join(c.name for c in parts)}) "
+                       f"= {_channel_gmv(built):,.0f} — the sheets carry no {parent} "
+                       f"column with data, so it was built from its parts")
+    return derived
+
+
 def load_channels(period: "Period | None" = None) -> tuple[list[Channel], Period]:
     """Return (channels, reporting Period). Both sheets are read for the month
     and merged by OVERWRITE (prefer the sheet with data; never sum). If `period`
@@ -440,6 +489,8 @@ def load_channels(period: "Period | None" = None) -> tuple[list[Channel], Period
     qc_list = parse_tab(qc_src, period.tab_qc) if period.tab_qc else []
     mkt_list = parse_tab(mkt_src, period.tab_mkt) if period.tab_mkt else []
     chans, conflicts = _merge_channels(qc_list, mkt_list, period.label)
+    # A parent with no column of its own is built by summing its sub-channels.
+    period.derived = _synthesize_parents(chans, period.label)
     period.conflicts = conflicts
     return chans, period
 

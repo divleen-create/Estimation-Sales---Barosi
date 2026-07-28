@@ -94,7 +94,16 @@ def main() -> None:
         qc.summary_text(results, freshness, conflicts=conflicts,
                         month_label=model.month_label, model=model, diags=diags,
                         notes=notes, generated=generated), encoding="utf-8")
-    print(f"\nQC summary saved: {summary_path}")
+    # HTML twin of the same validation — this is the daily email body.
+    mail_path = html_path.with_name(html_path.stem + "_qc_summary.html")
+    mail_path.write_text(
+        qc.summary_html(results, freshness, conflicts=conflicts,
+                        month_label=model.month_label, model=model, diags=diags,
+                        notes=notes, generated=generated), encoding="utf-8")
+    print(f"\nQC summary saved: {summary_path}\nQC mail body  : {mail_path}")
+    if model.derived_parents:
+        for d in model.derived_parents:
+            print(f"DERIVED: {d}")
     if not passed and args.strict:
         raise SystemExit("QC failed and --strict set; PNG not generated.")
 

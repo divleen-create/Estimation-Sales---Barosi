@@ -83,8 +83,9 @@ independent layers, so a mistake in one place is caught by another. All six driv
   parsed (flags `units present but 0 GMV days` — the signature of a month-labelled
   header being dropped, e.g. the Zepto Mar'26 bug).
 - **E — business edge cases:** the agreed rules, each as a check —
-  - Amazon ≈ Amazon Core + Amazon NOW+Fresh on GMV **and** LM (5% tolerance), and
-    the parts stay sub-channels (no daily table of their own).
+  - **Sub-channel roll-up, both ways** (see §3b): parent entered → parent ≈ Σ parts
+    within 5%; parent absent → it is **built** from the parts and must equal them
+    exactly, day by day. The parts always stay sub-channels (no daily table).
   - **T-2 lag** (Amazon GMV): the pending tail stays **blank, never 0**, and a blank
     day never carries a growth figure — a lag can't read as a drop.
   - Every channel expected to carry **Ad Sales** still does (`config.AD_CHANNELS`);
@@ -104,7 +105,7 @@ independent layers, so a mistake in one place is caught by another. All six driv
   parses, has 12 slots per year, covers every daily platform and whose current-month
   values equal the model's.
 - **Cross-sheet check:** where both source sheets carry the same channel for a
-  month, their GMV totals must agree (see §3b).
+  month, their GMV totals must agree (see §3c).
 
 Two audits are **advisory** and never block the publish:
 
@@ -130,7 +131,29 @@ also has `lm`/`last` or the previous month's name, e.g. `Feb GMV`, `Last Month G
 anything with `ad` → Ad Sales; `units` → Units. This is what fixes month-labelled
 headers like **`March GMV` / `Total Value`** that used to be silently dropped (→ GMV 0).
 
-## 3b. Two-sheet merge (overwrite, never sum)
+## 3b. Parent vs sub-channels (Amazon = Core + NOW+Fresh)
+
+`config.SUBCHANNELS` declares that **Amazon Core** and **Amazon NOW+Fresh** are parts
+of **Amazon**. Two situations, both handled automatically:
+
+1. **Only the parts are in the sheet** (no `Amazon` column, or it's empty) →
+   `data_source._synthesize_parents` **builds Amazon by summing the parts day by day**
+   (units, GMV, LM, Ad Sales separately). A day where every part is blank stays blank,
+   so a T-2 tail never becomes 0. The contribution % is then each part's share of that
+   built total, and the roll-up gap is 0 by construction. The QC mail says
+   *"built from parts"*; note that if the parts carry no ad column, Amazon has no
+   Ad Sales — nothing is invented.
+2. **All three are in the sheet** → the **entered `Amazon` column wins** and is what the
+   report publishes; the parts only describe the split. The difference —
+   **gap = Amazon as entered − Σ parts** — is shown in the QC mail (₹ and %), plus the
+   LM gap, so an unattributed remainder is visible instead of silently absorbed. On
+   July 2026 that gap is ₹2.04 L (+1.36%). It's also surfaced on the report itself, in
+   the Amazon contribution strip, as *"Unattributed …"*.
+
+Layer E fails the run if an entered parent drifts more than `config.ROLLUP_TOL` (5%)
+from its parts, or if a built parent doesn't match them exactly.
+
+## 3c. Two-sheet merge (overwrite, never sum)
 For each month BOTH workbooks are read and merged per channel by **overwrite**
 (`data_source._merge_channels`): prefer whichever sheet has data; if only one has it,
 use that; if neither, skip. When **both sheets have data but disagree**, the channel is
@@ -366,12 +389,14 @@ To place one global chart between the two blocks, each month is split into a `_p
 ### Email alerts (QC + mismatch)
 Two workflow email steps send to **divleen@barosi.in** (both skip silently until the
 SMTP secrets are set, so the report keeps publishing meanwhile):
-- **Daily QC report** — the full validation in the **email body** *and* attached as
-  `output/index_qc_summary.txt`, every run (even if the build fails, so you always get
-  the validation). Contents: the verdict (also in the subject line), a per-layer tally,
-  the headline numbers, the **per-channel Excel-vs-output table** (sheet Total row │
-  report │ diff │ MATCH), any failures, the edge-case rules that were verified, the
-  cross-sheet check, estimate freshness and the sanity advisories.
+- **Daily QC report** — a **formatted HTML mail** (`output/index_qc_summary.html`, built
+  by `qc.summary_html`) with the plain-text twin (`index_qc_summary.txt`) attached and
+  used as the fallback body. Sent every run, even if the build fails. Contents: a green
+  or red verdict banner (the verdict is also in the subject), a KPI strip, a per-layer
+  pass table, the **per-channel Excel-vs-output table** (sheet Total │ report │ diff │
+  MATCH), the **sub-channel roll-up table** (entered vs Σ parts, gap ₹ and %, each
+  part's contribution share), any failures, the cross-sheet check, estimate freshness
+  and the sanity advisories — all colour-coded (green pass · amber advisory · red fail).
 - **Mismatch alert** — fires only when `output/sheet_conflicts.txt` exists (two sheets
   disagreed; that channel was left blank).
 - **Setup (one time):** add repo secrets `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`,

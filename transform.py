@@ -69,6 +69,29 @@ class Section:
 
 
 @dataclass
+class Rollup:
+    """Parent-vs-parts reconciliation for a channel that has sub-channels.
+
+    Two cases, both handled:
+      * the sheet carries the parent column   -> `derived` False: the ENTERED figure
+        is the report's number, the parts only give the contribution split, and
+        `gap` (entered - Σparts) is reported so the difference is visible.
+      * the sheet has only the parts          -> `derived` True: the parent was
+        summed from them, so the gap is 0 by construction.
+    """
+    parent: str
+    derived: bool
+    entered_gmv: float          # the parent figure the report uses
+    parts_gmv: float            # Σ sub-channels
+    gap: float                  # entered - parts (₹)
+    gap_pct: Optional[float]    # gap / entered
+    entered_lm: float
+    parts_lm: float
+    lm_gap: float
+    parts: list = field(default_factory=list)   # [(name, gmv, share_of_parent)]
+
+
+@dataclass
 class ReportModel:
     month_label: str
     year: int
@@ -81,6 +104,8 @@ class ReportModel:
     worst_channel: Optional[str]
     pending_note: Optional[str] = None
     merge_conflicts: list = field(default_factory=list)
+    rollups: list = field(default_factory=list)     # Rollup per parent channel
+    derived_parents: list = field(default_factory=list)  # notes from data_source
     # True when link_previous() filled this month's LM baseline from the actual
     # previous month (its own in-tab LM column was blank). The current month is
     # never linked, so QC's "LM = Σ daily LM cells" identity only applies there.
@@ -185,7 +210,34 @@ def build_report(period=None) -> ReportModel:
         worst_channel=worst.name if worst else None,
         pending_note=period.pending_note,
         merge_conflicts=list(period.conflicts),
+        rollups=_rollups(summaries, period.derived),
+        derived_parents=list(period.derived),
     )
+
+
+def _rollups(summaries: list[ChannelSummary], derived_notes) -> list[Rollup]:
+    """Parent vs Σ sub-channels for every parent in config.SUBCHANNELS, plus each
+    part's contribution share of the parent (the denominator is always the parent
+    figure the report uses — entered when the sheet has it, else the derived sum)."""
+    by = {c.name: c for c in summaries}
+    was_derived = {str(n).split("·")[-1].split("=")[0].strip() for n in derived_notes}
+    out: list[Rollup] = []
+    for parent, subs in config.SUBCHANNELS.items():
+        p, parts = by.get(parent), [by[s] for s in subs if s in by]
+        if not p or not parts:
+            continue
+        pg = sum(x.gmv_mtd for x in parts)
+        pl = sum(x.lm_mtd for x in parts)
+        out.append(Rollup(
+            parent=parent, derived=parent in was_derived,
+            entered_gmv=p.gmv_mtd, parts_gmv=pg,
+            gap=p.gmv_mtd - pg,
+            gap_pct=((p.gmv_mtd - pg) / p.gmv_mtd) if p.gmv_mtd else None,
+            entered_lm=p.lm_mtd, parts_lm=pl, lm_gap=p.lm_mtd - pl,
+            parts=[(x.name, x.gmv_mtd, (x.gmv_mtd / p.gmv_mtd) if p.gmv_mtd else None)
+                   for x in parts],
+        ))
+    return out
 
 
 def _prev_ym(year: int, month: int) -> tuple[int, int]:
