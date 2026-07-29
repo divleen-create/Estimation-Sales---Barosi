@@ -99,6 +99,12 @@ independent layers, so a mistake in one place is caught by another. All six driv
   - No stray sheet group (`Total`, `xx`) became a channel; conversely every channel
     the sheets carry reached the output (or is a declared conflict).
   - `days_in_month` matches the calendar and "Data as of" = the latest date anywhere.
+- **G — Spend Split:** the category-ad-spend card shows only what that sheet holds —
+  every window's end-day parsed, every channel row present, **no share without its ₹
+  figure**, an unfilled row stays N/A (never 0), and the card + its source label are
+  actually rendered. Sheet-quality problems (a window nobody filled, categories not
+  adding to the total, shares not making 100%) are **advisories** — they're the
+  sheet's to fix and never block the publish. See §3d.
 - **F — page structure:** one pane + one dropdown option per month; one daily table
   per daily platform (sub-channels get none); the Amazon contribution strip; the
   freshness card; a pending-month note when applicable; and a **trend dataset** that
@@ -163,6 +169,43 @@ sheets and re-run; nothing is ever summed across the two sheets.
 
 ---
 
+## 3d. Spend Split — category ad spend (third workbook)
+
+A separate read-only workbook, **Spend Split**
+([sheet](https://docs.google.com/spreadsheets/d/1YT5_v7wJqCZdC74uAhrNLaAUOUaknSE58bXsehO76TY/edit)),
+holds **cumulative ad spend per platform split by product category** — A2 Ghee, Cow
+Ghee, and everything else as Others. Its tabs are plain month names (`June`, `July`);
+**June is ignored** and reporting starts from **July 2026** (`config.SPEND_START_PERIOD`).
+
+- **Layout it expects:** a row of window labels (`1-7th July`, `1-15th July`, …), a row
+  of category headers, then one row per platform. Each window is 7 columns: for every
+  category a ₹ column and its `Ad Spend%` column, then `Total Spend`. `spend.py` finds
+  the windows by their `1-Nth` label, so any number of windows works and nothing is
+  hard-coded to July's layout.
+- **Shown as written.** Missing cells and error cells are **N/A** — never 0, never
+  estimated. A window nobody has filled in is marked *pending*. A share is only shown
+  next to a ₹ figure. July's `1-15th` window is blank for everything except Amazon, and
+  Amazon's `1-26th` is blank (T-2) — that's exactly what the card shows.
+- **Where it appears:** a **Spend Split** card immediately **above Date-wise detail**,
+  inside the month pane (so it follows the month picker). A *Window* dropdown switches
+  between `1-7th` / `1-15th` / `1-26th`, defaulting to the latest one with data. Each
+  window shows category KPIs, one bar per platform (bar **length** = that platform's
+  spend, **segments** = its category mix, sorted biggest first), and the full table with
+  ₹ + % per category. Where an earlier window overlaps, an *Added since …* column shows
+  what the window added — dropped entirely when no platform overlaps, so it can never
+  subtract across two different sets of platforms.
+- **From August** the expected windows are `1-7th`, `1-15th`, `1-21st` and
+  `1-<month end>` (`config.SPEND_BUCKET_DAYS`). Whatever labels the sheet actually has
+  are still read and shown; a label outside that cadence is an advisory only.
+- **Not the same as Ad Sales.** This is category-level ghee spend and is deliberately
+  **never reconciled** against the report's Ad Sales column — the card and the QC mail
+  both say so.
+- **Access:** the same service account must be shared as **Viewer** on this sheet too.
+  The pull (`gsheets.fetch_spend_snapshot()`) is **non-fatal**: if the sheet can't be
+  read the sales report still publishes, the card simply isn't there, and the QC mail
+  says *"Spend Split not available"*. Its snapshot is **not** committed to the repo on
+  purpose, so a card can never be rendered from a stale local copy.
+
 ## 4. Month rollover (July → August) — automatic
 
 You don't change anything. Each run picks the **latest month tab that is
@@ -195,7 +238,8 @@ One-time setup:
 1. `pip install google-api-python-client google-auth`
 2. Google Cloud console → new project → enable **Google Sheets API**.
 3. Create a **service account**, add a **JSON key**, download it.
-4. **Share both sheets** with the service-account email (…iam.gserviceaccount.com) as **Viewer**.
+4. **Share all three sheets** with the service-account email (…iam.gserviceaccount.com) as
+   **Viewer** — the two sales workbooks **and** the **Spend Split** sheet (§3d).
 5. Point the tool at the key:
    ```powershell
    $env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\key.json"
@@ -205,8 +249,9 @@ Then, each refresh — **you must be inside the `report_tool` folder** (that's w
 `gsheets.py` lives; running from `C:\Users\…>` gives `No module named 'gsheets'`):
 ```powershell
 cd "C:\Users\Divleen Chaudhary\Downloads\Sales & Estimation\report_tool"
-python -c "import gsheets; gsheets.fetch_snapshots()"   # read-only pull -> snapshots\
-python main.py                                          # auto-uses the snapshots
+python -c "import gsheets; gsheets.fetch_snapshots()"       # read-only pull -> snapshots\
+python -c "import gsheets; gsheets.fetch_spend_snapshot()"  # Spend Split (optional, §3d)
+python main.py                                             # auto-uses the snapshots
 ```
 Or just run `run_report.bat` (it `cd`s itself, so it works from any directory).
 
@@ -285,6 +330,8 @@ different setup). The scheduled task leaves `output\index.png` ready to forward.
 | Run only the QC check | `python qc.py` |
 | Inspect parsed data / resolved month | `python data_source.py` |
 | Pull live Sheets (read-only) | `python -c "import gsheets; gsheets.fetch_snapshots()"` |
+| Pull the Spend Split sheet | `python -c "import gsheets; gsheets.fetch_spend_snapshot()"` |
+| Inspect parsed Spend Split | `python spend.py` |
 
 ---
 

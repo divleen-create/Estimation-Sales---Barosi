@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import config
+import spend as _spend
 from data_source import Channel, DailyRecord, load_channels
 
 
@@ -104,6 +105,7 @@ class ReportModel:
     worst_channel: Optional[str]
     pending_note: Optional[str] = None
     merge_conflicts: list = field(default_factory=list)
+    spend: object = None                            # spend.SpendTable | None
     rollups: list = field(default_factory=list)     # Rollup per parent channel
     derived_parents: list = field(default_factory=list)  # notes from data_source
     # True when link_previous() filled this month's LM baseline from the actual
@@ -212,6 +214,9 @@ def build_report(period=None) -> ReportModel:
         merge_conflicts=list(period.conflicts),
         rollups=_rollups(summaries, period.derived),
         derived_parents=list(period.derived),
+        # "Spend Split" (third workbook) — category-level ad spend. Optional and
+        # non-fatal: None when the sheet isn't available or the month predates it.
+        spend=_spend.load_month(period.year, period.month, period.label),
     )
 
 

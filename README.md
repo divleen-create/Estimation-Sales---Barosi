@@ -61,7 +61,8 @@ August data lands; falls back to the last populated month). See GUIDE.md.
 | `render_html.py` | self-contained HTML one-pager |
 | `render_image.py` | HTML → WhatsApp PNG (headless Chrome/Edge + autocrop) |
 | `main.py` | orchestrates resolve → transform → render → QC |
-| `qc.py` | 6-layer self-check: A sheet→model · B identities · C model→HTML · D parsing · E business edge cases · F page structure (+ advisory estimate-freshness and sanity audits). See GUIDE §3 |
+| `spend.py` | read-only parser for the **Spend Split** workbook (cumulative ad spend by A2 Ghee / Cow Ghee / Others per platform); shows only what the sheet holds, N/A otherwise. See GUIDE §3d |
+| `qc.py` | 7-layer self-check: A sheet→model · B identities · C model→HTML · D parsing · E business edge cases · F page structure · G Spend Split (+ advisory estimate-freshness and sanity audits). See GUIDE §3 |
 | `gsheets.py` | optional **read-only** Google Sheets → local snapshot |
 
 ## Switching to live Google Sheets (read-only)

@@ -28,6 +28,7 @@ from __future__ import annotations
 import datetime as _dt
 import os
 from pathlib import Path
+from typing import Optional
 
 import openpyxl
 
@@ -40,6 +41,10 @@ _SHEETS = {
     config.GSHEET_QC_ID: SNAPSHOT_DIR / "qc_snapshot.xlsx",
     config.GSHEET_MKT_ID: SNAPSHOT_DIR / "mkt_snapshot.xlsx",
 }
+# "Spend Split" is pulled separately: its tabs are plain month names ("July"),
+# which the month-tab matcher used for the two sales workbooks doesn't recognise,
+# and a failure here must never stop the sales report from publishing.
+_SPEND_SNAPSHOT = SNAPSHOT_DIR / "spend_snapshot.xlsx"
 _EXCEL_EPOCH = _dt.datetime(1899, 12, 30)
 
 
@@ -100,5 +105,39 @@ def fetch_snapshots() -> dict[str, Path]:
     return dict(_SHEETS)
 
 
+def fetch_spend_snapshot(strict: bool = False) -> Optional[Path]:
+    """Pull EVERY tab of the read-only "Spend Split" workbook into
+    snapshots/spend_snapshot.xlsx. Tabs are plain month names, so all of them are
+    snapshotted and spend.py picks the one matching the reporting month.
+
+    Returns the path, or None when it could not be read (no key, sheet not shared
+    with the service account, sheet renamed). This is deliberately NON-FATAL: the
+    Spend Split card is additional context, and the sales report must still publish
+    without it. Pass strict=True to raise instead.
+    """
+    try:
+        svc = _service()
+        meta = svc.spreadsheets().get(spreadsheetId=config.GSHEET_SPEND_ID).execute()
+        tabs = []
+        for s in meta["sheets"]:
+            title = s["properties"]["title"]
+            resp = svc.spreadsheets().values().get(
+                spreadsheetId=config.GSHEET_SPEND_ID, range=f"'{title}'",
+                valueRenderOption="UNFORMATTED_VALUE",
+                dateTimeRenderOption="SERIAL_NUMBER").execute()
+            tabs.append((title, resp.get("values", [])))
+        _write_snapshot(_SPEND_SNAPSHOT, tabs)
+        print(f"snapshot -> {_SPEND_SNAPSHOT}  ({', '.join(t for t, _ in tabs)})")
+        return _SPEND_SNAPSHOT
+    except Exception as e:  # noqa: BLE001
+        if strict:
+            raise
+        print(f"WARN : Spend Split not pulled ({type(e).__name__}: {e}). "
+              f"The report will publish without the Spend Split card. "
+              f"Check that the sheet is shared as Viewer with the service account.")
+        return None
+
+
 if __name__ == "__main__":
     fetch_snapshots()
+    fetch_spend_snapshot()

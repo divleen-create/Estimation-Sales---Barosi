@@ -28,6 +28,10 @@ WORKBOOK_MKT = BASE_DIR / "Daily Sales Reporting-(New -Platform + D2C+ Amazon).x
 # --- Google Sheets (read-only; wired later, never written) ------------------
 GSHEET_QC_ID = "12dc5vEy4D1ws9aAjbFEravibLX3CYQO8uZuTKZAS4Lo"
 GSHEET_MKT_ID = "174gdhqGFrCKj0EY3WdbbtObM46fp4n7wCFyPtPp8krg"
+# Third workbook: "Spend Split" — week-cumulative ad spend by product category
+# (A2 Ghee / Cow Ghee / Others) per platform. Tabs are plain month names
+# ("June", "July"). Read-only, same service account.
+GSHEET_SPEND_ID = "1YT5_v7wJqCZdC74uAhrNLaAUOUaknSE58bXsehO76TY"
 # Read-only scope only. The pipeline must never request write scopes.
 GSHEET_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 
@@ -120,6 +124,21 @@ ROLLUP_TOL = 0.05          # 5%
 FRESHNESS_LAG_DAYS = {"_default": 1, "Amazon": 2}
 # Platforms reviewed monthly — never flagged for missing daily data.
 MONTHLY_PLATFORMS = {"Flipkart"}
+
+# --- Spend Split (third workbook) -------------------------------------------
+# Product categories tracked, in display order. Anything that is not A2 Ghee or
+# Cow Ghee is lumped into "Others" by the sheet itself; we only read what's there.
+SPEND_CATEGORIES = ["A2 Ghee", "Cow Ghee", "Others"]
+# Header fragment -> category (row-2 headers vary: 'Cow Ghee ' has a trailing space).
+SPEND_CATEGORY_KEYS = {"a2": "A2 Ghee", "cow": "Cow Ghee", "other": "Others"}
+# Earliest month to report. June exists in the sheet but is ignored per the brief.
+SPEND_START_PERIOD = (2026, 7)
+# Cumulative buckets expected from August onwards: 1-7th, 1-15th, 1-21st and
+# 1-to-month-end. July is ad hoc (1-7th / 1-15th / 1-26th) and is shown as written;
+# a label that doesn't match this cadence is an ADVISORY, never a failure.
+SPEND_BUCKET_DAYS = [7, 15, 21, None]        # None = last day of the month
+# Colours for the category split bar (kept in step with the report's palette).
+SPEND_COLORS = {"A2 Ghee": "#12608a", "Cow Ghee": "#d9a441", "Others": "#9aa7b4"}
 
 # --- Output -----------------------------------------------------------------
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"

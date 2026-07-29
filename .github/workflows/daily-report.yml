@@ -44,6 +44,11 @@ jobs:
           export GOOGLE_APPLICATION_CREDENTIALS=/tmp/key.json
           python -c "import gsheets; gsheets.fetch_snapshots()"
           echo "Live sheets pulled successfully."
+          # Third workbook: "Spend Split" (category ad spend). NON-FATAL by design —
+          # if it isn't shared with the service account the sales report still
+          # publishes, just without the Spend Split card, and the QC mail says so.
+          python -c "import gsheets; gsheets.fetch_spend_snapshot()" \
+            || echo "::warning title=Spend Split::could not pull the Spend Split sheet; the report will publish without that card."
 
       - name: Build report
         # --strict: abort (non-zero exit) if the numbers don't reconcile against the

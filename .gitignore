@@ -2,6 +2,12 @@
 # (Pages serves the repo-root index.html, which the workflow still commits.)
 output/
 
+# Spend Split snapshot is deliberately NOT tracked: the Spend Split card must
+# appear only when the live read-only pull actually succeeded. Committing a copy
+# would let a stale/hand-made file publish silently if the sheet ever stops being
+# shared with the service account — that would be bluffing.
+snapshots/spend_snapshot.xlsx
+
 # Python bytecode
 __pycache__/
 *.pyc

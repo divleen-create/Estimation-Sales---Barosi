@@ -6,6 +6,8 @@ cd /d "%~dp0"
 
 echo [%date% %time%] pulling live sheets (read-only)...
 python -c "import gsheets; gsheets.fetch_snapshots()" || echo   live pull skipped (no creds) - using local files
+REM Spend Split (third workbook) - optional; prints a warning and carries on if unavailable.
+python -c "import gsheets; gsheets.fetch_spend_snapshot()"
 
 echo [%date% %time%] building report...
 python main.py

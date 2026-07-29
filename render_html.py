@@ -136,6 +136,32 @@ table.daily{width:100%;table-layout:fixed}
 .consol .ct-meta{font-size:13px;color:var(--muted);text-align:right}
 .consol .ct-meta b{color:var(--ink)}
 @media (max-width:720px){ .consol{align-items:flex-start} .consol .ct-meta{text-align:left} .consol .ct-gmv{font-size:22px} }
+/* Spend Split (category ad spend) */
+.spend .sp-legend{gap:14px;margin:2px 0 12px}
+.spend .sp-legend .lg{display:inline-flex;align-items:center;gap:6px}
+.spend .sp-legend i{width:12px;height:12px;border-radius:3px;display:inline-block}
+.sp-kpis{grid-template-columns:repeat(4,1fr);margin:0 0 14px}
+.sp-kpis .val{font-size:19px}
+.sp-bars{margin:2px 0 14px}
+.sp-row{display:flex;align-items:center;gap:10px;padding:3px 0}
+.sp-name{flex:0 0 130px;font-weight:700;font-size:12px;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.sp-track{flex:1 1 auto;background:var(--neu);border-radius:6px;height:16px;overflow:hidden}
+.sp-fill{display:flex;height:100%;border-radius:6px;overflow:hidden;min-width:2px}
+.sp-fill i{display:block;height:100%}
+.sp-val{flex:0 0 74px;text-align:right;font-size:12px;font-weight:700;
+  font-variant-numeric:tabular-nums}
+.sp-empty{font-size:11.5px;color:var(--muted);background:var(--neu);border:1px solid var(--line);
+  border-radius:8px;padding:8px 10px;margin:2px 0 10px}
+.sp-empty b{color:var(--ink)}
+.spendtbl tr.sp-na td{color:var(--muted);background:#fcfdfe}
+.spend .sp-pane[hidden]{display:none}
+@media (max-width:720px){
+  .sp-kpis{grid-template-columns:1fr 1fr}
+  .sp-name{flex-basis:92px;font-size:11px}
+  .sp-val{flex-basis:62px;font-size:11px}
+  table.spendtbl{min-width:760px}
+}
 /* trend chart */
 .trend-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
 .trend-head .name{font-size:16px;font-weight:800;color:var(--brand2)}
@@ -464,6 +490,170 @@ def _daily_filter_card(m: ReportModel, dim: int) -> str:
             f'{note}{"".join(panes)}</div>')
 
 
+def _spend_card(m: ReportModel) -> str:
+    """"Spend Split" — cumulative ad spend by product category, per platform.
+
+    Read as: *where is the ad money going, and how much of it is behind A2 Ghee /
+    Cow Ghee?* So the card leads with the category totals for the selected window,
+    then one row per platform sorted by spend, each with a bar whose LENGTH is the
+    platform's spend and whose SEGMENTS are the category mix — magnitude and mix in
+    one glance. A bucket dropdown switches windows (1-7th / 1-15th / …), defaulting
+    to the latest one that has been filled in. Anything the sheet doesn't hold is
+    N/A — never zero, never guessed.
+    """
+    t = getattr(m, "spend", None)
+    if not t or not t.buckets:
+        return ""
+    cats = config.SPEND_CATEGORIES
+    latest = t.latest
+    default_idx = t.buckets.index(latest) if latest else 0
+
+    legend = "".join(
+        f'<span class="lg"><i style="background:{config.SPEND_COLORS.get(c, "#ccc")}"></i>'
+        f'{_e(c)}</span>' for c in cats)
+    opts = "".join(
+        f'<option value="{i}"{" selected" if i == default_idx else ""}>{_e(b.label)}'
+        f'{"" if not b.pending else " · pending"}</option>'
+        for i, b in enumerate(t.buckets))
+
+    panes = []
+    for i, b in enumerate(t.buckets):
+        hidden = "" if i == default_idx else " hidden"
+        # Previous filled bucket -> "added since" on the total (buckets are cumulative).
+        prev = None
+        for cand in t.buckets[:i]:
+            if not cand.pending:
+                prev = cand
+        prev_tot = {r.channel: r.total for r in prev.rows} if prev else {}
+
+        if b.pending:
+            panes.append(
+                f'<div class="sp-pane" data-sp="{i}"{hidden}>'
+                f'<div class="sp-empty">Nothing has been filled in for '
+                f'<b>{_e(b.label)}</b> yet — every figure below is <b>N/A</b>. '
+                f'The window is shown because the sheet has the columns for it.</div>'
+                f'{_spend_table(b, cats, {}, None)}</div>')
+            continue
+
+        rows = sorted(b.filled_rows, key=lambda r: (r.total or 0), reverse=True)
+        biggest = max((r.total or 0) for r in rows) or 1
+        total = b.grand_total() or 0
+        kpis = [("Total spend", _sp_money(total), f"{len(rows)} platform"
+                 f"{'s' if len(rows) != 1 else ''} reporting")]
+        for c in cats:
+            v = b.cat_total(c)
+            share = (v / total) if (v is not None and total) else None
+            kpis.append((c, _sp_money(v) if v is not None else "N/A",
+                         f"{share*100:.1f}% of spend" if share is not None else "not in sheet"))
+        kpi_html = "".join(
+            f'<div class="kpi"><div class="lab">{_e(k)}</div>'
+            f'<div class="val">{_e(v)}</div><div class="note">{_e(n)}</div></div>'
+            for k, v, n in kpis)
+        bars = "".join(_spend_bar(r, cats, biggest) for r in rows)
+        pend = [r.channel for r in b.rows if not r.filled]
+        pend_note = (f'<div class="sp-empty">No {_e(b.label)} figures for '
+                     f'<b>{_e(", ".join(pend))}</b> — shown as N/A, not zero.</div>'
+                     if pend else "")
+        panes.append(
+            f'<div class="sp-pane" data-sp="{i}"{hidden}>'
+            f'<div class="kpis sp-kpis">{kpi_html}</div>'
+            f'<div class="sp-bars">{bars}</div>{pend_note}'
+            f'{_spend_table(b, cats, prev_tot, prev)}</div>')
+
+    return (f'<div class="card spend">'
+            f'<div class="trend-head"><div class="name">Spend Split · ad spend by category</div>'
+            f'<div class="trend-ctrls"><label for="spendPick">Window</label>'
+            f'<select class="spendpick" onchange="__showSpend(this)">{opts}</select>'
+            f'</div></div>'
+            f'<div class="grid-note" style="margin:0 0 8px">Cumulative ad spend from the 1st of '
+            f'{_e(t.month_label)}, split across <b>A2 Ghee</b>, <b>Cow Ghee</b> and everything '
+            f'else (<b>Others</b>). Bar length = that platform’s spend, segments = its category '
+            f'mix. <b>N/A</b> means the sheet has no figure — nothing is estimated. This is '
+            f'category ad spend from the <b>Spend Split</b> sheet and is <b>not</b> the same '
+            f'series as the Ad Sales column above.'
+            f'<span class="tag">Source: {_e(t.source)}</span></div>'
+            f'<div class="tr-legend sp-legend">{legend}</div>'
+            f'{"".join(panes)}</div>')
+
+
+def _sp_money(v) -> str:
+    """Spend figures span ₹3,909 to ₹26 L, so lakh-only rounding would print
+    '₹0.0 L' and lose real numbers. Below a lakh, show the exact rupee value."""
+    if v is None:
+        return "–"
+    return fmt.money_l(v) if abs(v) >= 1e5 else fmt.rupees(v)
+
+
+def _spend_bar(row, cats, biggest: float) -> str:
+    """One platform: name + spend, then a proportional split bar."""
+    tot = row.total or sum(c.spend or 0 for c in row.cats.values())
+    width = max(6.0, (tot / biggest) * 100.0) if biggest else 0
+    segs = []
+    for c in cats:
+        v = row.cats.get(c)
+        sv = v.spend if v else None
+        if not sv or not tot:
+            continue
+        segs.append(
+            f'<i style="width:{sv / tot * 100:.2f}%;background:{config.SPEND_COLORS.get(c, "#ccc")}"'
+            f' title="{_e(c)} {_sp_money(sv)} · {sv / tot * 100:.1f}%"></i>')
+    return (f'<div class="sp-row"><div class="sp-name">{_e(row.channel)}</div>'
+            f'<div class="sp-track"><div class="sp-fill" style="width:{width:.2f}%">'
+            f'{"".join(segs)}</div></div>'
+            f'<div class="sp-val">{_sp_money(tot) if tot else "N/A"}</div></div>')
+
+
+def _spend_table(b, cats, prev_tot: dict, prev) -> str:
+    """₹ and share per category per platform, exactly as the sheet has them."""
+    na = '<span class="na">N/A</span>'
+    # "Added since <earlier window>" only makes sense where BOTH windows have that
+    # platform. If no platform overlaps, the column is dropped rather than shown
+    # full of N/A — and the total is the sum of the real deltas only, never a
+    # subtraction across two different sets of platforms.
+    deltas = {}
+    if prev:
+        for r in b.rows:
+            p = prev_tot.get(r.channel)
+            if r.total is not None and p is not None:
+                deltas[r.channel] = r.total - p
+    show_delta = bool(deltas)
+    head = "".join(f'<th>{_e(c)} ₹</th><th>{_e(c)} %</th>' for c in cats)
+    add_col = f'<th>Added since {_e(prev.label)}</th>' if show_delta else ""
+    body = []
+    order = sorted(b.rows, key=lambda r: (r.filled, r.total or 0), reverse=True)
+    for r in order:
+        tds = []
+        for c in cats:
+            cell = r.cats.get(c)
+            sv = cell.spend if cell else None
+            pv = cell.pct if cell else None
+            tds.append(f'<td>{_sp_money(sv) if sv is not None else na}</td>')
+            # A share is only meaningful next to a figure; otherwise it is N/A too.
+            tds.append(f'<td>{fmt.pct_plain(pv) if (sv is not None and pv is not None) else na}</td>')
+        tot = f'<b>{_sp_money(r.total)}</b>' if r.total is not None else na
+        if show_delta:
+            d = deltas.get(r.channel)
+            tds.append(f'<td>{_sp_money(d) if d is not None else na}</td>')
+        cls = "" if r.filled else ' class="sp-na"'
+        body.append(f'<tr{cls}><td class="chan">{_e(r.channel)}</td>'
+                    f'{"".join(tds)}<td>{tot}</td></tr>')
+    # Totals across the platforms that did report.
+    tcells = []
+    total = b.grand_total()
+    for c in cats:
+        v = b.cat_total(c)
+        tcells.append(f'<td>{_sp_money(v) if v is not None else na}</td>')
+        share = (v / total) if (v is not None and total) else None
+        tcells.append(f'<td>{fmt.pct_plain(share) if share is not None else na}</td>')
+    if show_delta:
+        tcells.append(f'<td>{_sp_money(sum(deltas.values()))}</td>')
+    body.append(f'<tr class="tot"><td>Total</td>{"".join(tcells)}'
+                f'<td>{_sp_money(total) if total is not None else "–"}</td></tr>')
+    return (f'<div class="tw"><table class="daily spendtbl"><thead><tr><th>Platform</th>{head}'
+            f'{add_col}<th>Total spend</th></tr></thead><tbody>{"".join(body)}</tbody>'
+            f'</table></div>')
+
+
 def _prev_month_label(year: int, month: int) -> str:
     """Calendar month before (year, month), e.g. (2025, 7) -> 'June 2025'."""
     y, mth = (year - 1, 12) if month == 1 else (year, month - 1)
@@ -511,7 +701,13 @@ def _daily_pane(m: ReportModel, idx: int) -> str:
     the month-pane class + data-idx so the month dropdown toggles it in step with
     the platform pane; the global Trend card sits between the two pane groups."""
     hidden = "" if idx == 0 else " hidden"
-    daily_block = ('<div class="section-label">Date-wise detail</div>'
+    # Spend Split sits ABOVE the date-wise detail: it answers "where did the ad
+    # money go this month" before the reader drops into day-level tables.
+    spend_block = _spend_card(m)
+    if spend_block:
+        spend_block = '<div class="section-label">Spend Split · category ad spend</div>' + spend_block
+    daily_block = (spend_block
+                   + '<div class="section-label">Date-wise detail</div>'
                    + _daily_filter_card(m, m.days_in_month))
     return f'<section class="month-pane" data-idx="{idx}"{hidden}>{daily_block}</section>'
 
@@ -724,6 +920,9 @@ def render_multi(models: "list[ReportModel]", generated: _dt.datetime, freshness
               "function __showPlat(sel){var pane=sel.closest('.month-pane');var v=sel.value;"
               "var p=pane.querySelectorAll('.ptbl-pane');"
               "for(var k=0;k<p.length;k++){p[k].hidden=(p[k].getAttribute('data-plat')!==v);}}"
+              "function __showSpend(sel){var card=sel.closest('.spend');var v=sel.value;"
+              "var p=card.querySelectorAll('.sp-pane');"
+              "for(var k=0;k<p.length;k++){p[k].hidden=(p[k].getAttribute('data-sp')!==v);}}"
               + _TREND_JS + "</script>")
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

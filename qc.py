@@ -429,6 +429,66 @@ def _layer_f_structure(models, html_text, results, complete: bool = True):
             f"chart={v} model={getattr(m0.grand, attr)}")
 
 
+# --- layer G: Spend Split ---------------------------------------------------
+def _layer_g_spend(model, html_text, results):
+    """The "Spend Split" card (category ad spend) must show exactly what that
+    sheet holds — nothing invented, nothing zero-filled.
+
+    Only things WE control are blocking: if the sheet was read, the card must be
+    rendered, every figure in it must trace back to a parsed cell, and a share may
+    never appear without its ₹ figure. Sheet-quality problems (a bucket nobody
+    filled, categories not adding to the total, shares not making 100%) are
+    reported as advisories — they are the sheet's to fix, not ours, and must never
+    stop the sales report from publishing.
+    """
+    def chk(name, ok, detail=""):
+        results.append(("G spend split", name, bool(ok), detail))
+
+    t = getattr(model, "spend", None)
+    if t is None:
+        return                      # nothing to check (month before July, or no sheet)
+    chk("Spend Split has at least one window", bool(t.buckets),
+        f"tab '{t.tab}'")
+    if not t.buckets:
+        return
+    chk("Spend Split month is not before the start month",
+        (t.year, t.month) >= tuple(config.SPEND_START_PERIOD),
+        f"{t.month_label} vs start {config.SPEND_START_PERIOD}")
+    for b in t.buckets:
+        chk(f"'{b.label}' window end-day parsed", b.end_day is not None, "expected '1-Nth'")
+        chk(f"'{b.label}' covers every channel row", len(b.rows) == len(t.channels),
+            f"{len(b.rows)} of {len(t.channels)}")
+        for r in b.rows:
+            # No share without a figure, and no figure invented for a blank row.
+            orphan = [c for c, cell in r.cats.items()
+                      if cell.spend is None and cell.pct not in (None, 0)]
+            chk(f"'{b.label}' {r.channel}: no share without a ₹ figure", not orphan,
+                f"{orphan}")
+            if not r.filled:
+                chk(f"'{b.label}' {r.channel}: blank stays blank",
+                    r.total is None and all(c.spend is None for c in r.cats.values()),
+                    "an unfilled row must be N/A, never 0")
+    if html_text:
+        chk("Spend Split card rendered", 'class="card spend"' in html_text, "")
+        chk("Spend Split source named on the card",
+            f"Source: {t.source}" in html_text, "")
+        n_sp = html_text.count('class="sp-pane"')
+        chk("one window pane per bucket", n_sp >= len(t.buckets),
+            f"{n_sp} panes vs {len(t.buckets)} buckets")
+        latest = t.latest
+        if latest:
+            chk("latest filled window's total is on the card",
+                _sp_money_str(latest.grand_total()) in html_text,
+                f"looking for {_sp_money_str(latest.grand_total())}")
+
+
+def _sp_money_str(v) -> str:
+    """Mirror of render_html._sp_money, for the layer-G HTML check and the mail."""
+    if v is None:
+        return "N/A"
+    return fmt.money_l(v) if abs(v) >= 1e5 else fmt.rupees(v)
+
+
 # --- advisory: estimate freshness ------------------------------------------
 @dataclass
 class Freshness:
@@ -613,6 +673,27 @@ def advisories(model, models=None, ctx: Optional[EdgeContext] = None) -> list[Ad
                             (", ".join(dropped_hdrs) + " — read and intentionally excluded")
                             if dropped_hdrs else "none found in this month's tabs"))
 
+    # 8b) Spend Split: availability + everything the sheet itself got wrong.
+    t = getattr(model, "spend", None)
+    if t is None:
+        out.append(Advisory("INFO", "Spend Split",
+                            f"no Spend Split data for {model.month_label} — the sheet has no "
+                            f"matching month tab, the snapshot is missing, or the month is "
+                            f"before {config.SPEND_START_PERIOD[1]}/"
+                            f"{config.SPEND_START_PERIOD[0]} (June is ignored by design)"))
+    else:
+        latest = t.latest
+        out.append(Advisory("OK" if latest else "WARN", "Spend Split",
+                            (f"tab '{t.tab}' · windows: "
+                             + ", ".join(f"{b.label}"
+                                         + (" (pending)" if b.pending else
+                                            f" = {_sp_money_str(b.grand_total())}")
+                                         for b in t.buckets)
+                             + (f" · latest filled: {latest.label}" if latest else
+                                " · nothing filled in yet"))))
+        for issue in t.issues:
+            out.append(Advisory("WARN", "Spend Split · sheet", issue))
+
     # 9) History coverage for the month slicer.
     if models:
         out.append(Advisory("OK", "Months rendered",
@@ -650,6 +731,7 @@ def run(html_path: Optional[Path] = None, model=None, diags=None, models=None,
     _layer_d_parsing(model, results)
     _layer_e_edges(model, ctx, results)
     _layer_f_structure(models or [model], html_text, results, complete=bool(models))
+    _layer_g_spend(model, html_text, results)
     freshness = _freshness(model, diags, model.days_in_month)
     notes = advisories(model, models, ctx)
     passed = all(ok for _, _, ok, _ in results)
@@ -695,6 +777,7 @@ _LAYER_TITLES = [
     ("D", "GMV column parsed for every active channel"),
     ("E", "Business edge cases (lag, roll-up, merge, no-bluffing)"),
     ("F", "Page structure (months, daily tables, trend)"),
+    ("G", "Spend Split card shows only what that sheet holds"),
 ]
 
 
@@ -726,6 +809,42 @@ def _recon_table(model, diags) -> list[str]:
               f"  {'':<18}{'LM':<7}{'':>21}{g.lm_mtd:>18,.0f}",
               f"  {'':<18}{'est':<7}{'':>21}{g.estimate:>18,.0f}",
               f"  {'':<18}{'gap':<7}{'':>21}{g.gap:>18,.0f}"]
+    return lines
+
+
+def _spend_lines(t) -> list[str]:
+    """Spend Split, as text, for the daily mail: one block per window."""
+    cats = config.SPEND_CATEGORIES
+    lines = [f"  tab '{t.tab}' · channels as named in that sheet: {', '.join(t.channels)}"]
+    for b in t.buckets:
+        tot = b.grand_total()
+        lines += ["", f"  {b.label}" + ("  [NOTHING FILLED IN — all N/A]" if b.pending
+                                        else f"  total {_sp_money_str(tot)}")]
+        hdr = f"    {'Platform':<18}" + "".join(f"{c + ' ₹':>14}{'%':>9}" for c in cats) \
+              + f"{'Total':>14}"
+        lines += [hdr, "    " + "-" * (len(hdr) - 4)]
+        for r in sorted(b.rows, key=lambda x: (x.filled, x.total or 0), reverse=True):
+            cells = ""
+            for c in cats:
+                cell = r.cats.get(c)
+                sv = cell.spend if cell else None
+                pv = cell.pct if cell else None
+                cells += f"{_sp_money_str(sv) if sv is not None else 'N/A':>14}"
+                cells += (f"{pv*100:>8.2f}%" if (sv is not None and pv is not None)
+                          else f"{'N/A':>9}")
+            cells += f"{_sp_money_str(r.total) if r.total is not None else 'N/A':>14}"
+            lines.append(f"    {r.channel:<18}{cells}")
+        if not b.pending:
+            cells = ""
+            for c in cats:
+                v = b.cat_total(c)
+                cells += f"{_sp_money_str(v) if v is not None else 'N/A':>14}"
+                cells += (f"{v/tot*100:>8.1f}%" if (v is not None and tot) else f"{'N/A':>9}")
+            cells += f"{_sp_money_str(tot):>14}"
+            lines.append(f"    {'TOTAL':<18}{cells}")
+    if t.issues:
+        lines += ["", "  Sheet notes (shown as written / N/A — nothing was corrected):"]
+        lines += [f"    - {i}" for i in t.issues]
     return lines
 
 
@@ -814,6 +933,11 @@ def summary_text(results, freshness: list[Freshness], conflicts=None,
                       "    split: " + " · ".join(
                           f"{n} {fmt.gmv_auto(g)} = {s*100:.1f}%" if s is not None else f"{n} –"
                           for n, g, s in r.parts)]
+
+    if model is not None and getattr(model, "spend", None):
+        lines += ["", "SPEND SPLIT (source: Spend Split sheet — category ad spend, cumulative "
+                  "from the 1st; NOT the report's Ad Sales series)"]
+        lines += _spend_lines(model.spend)
 
     lines += ["", "CROSS-SHEET CHECK (Quick Commerce sheet vs Marketplace & D2C sheet, same month):"]
     if conflicts:
@@ -1016,6 +1140,57 @@ def summary_html(results, freshness: list[Freshness], conflicts=None, month_labe
             if r.lm_gap:
                 out.append(_note(f"{_esc(r.parent)} LM gap: <b>{r.lm_gap:,.0f}</b> "
                                  f"(LM entered {r.entered_lm:,.0f} vs Σ parts {r.parts_lm:,.0f})."))
+
+    # Spend Split
+    t = getattr(model, "spend", None) if model is not None else None
+    if t and t.buckets:
+        cats = config.SPEND_CATEGORIES
+        out.append(_h2("Spend Split — ad spend by category"))
+        out.append(_note(
+            f'Source: <b>{_esc(t.source)}</b> sheet, tab <b>{_esc(t.tab)}</b>. Cumulative from '
+            f'the 1st of {_esc(t.month_label)}, split across A2 Ghee / Cow Ghee / Others. '
+            f'<b>N/A</b> = the sheet has no figure (never zero, never estimated). This is '
+            f'category ad spend and is <b>not</b> the report’s Ad Sales series.'))
+        for b in t.buckets:
+            tot = b.grand_total()
+            state = (_chip("nothing filled in", "warn") if b.pending
+                     else _chip(f"total {_sp_money_str(tot)}", "ok"))
+            latest_tag = (_chip("latest", "info")
+                          if (t.latest is not None and b is t.latest) else "")
+            out.append(f'<div style="margin:14px 0 0;font:700 13px Segoe UI,Arial,sans-serif">'
+                       f'{_esc(b.label)} {state} {latest_tag}</div>')
+            rows = []
+            for r in sorted(b.rows, key=lambda x: (x.filled, x.total or 0), reverse=True):
+                cells = []
+                for c in cats:
+                    cell = r.cats.get(c)
+                    sv = cell.spend if cell else None
+                    pv = cell.pct if cell else None
+                    cells.append(_sp_money_str(sv) if sv is not None
+                                 else _chip("N/A", "info"))
+                    cells.append(f"{pv*100:.2f}%" if (sv is not None and pv is not None)
+                                 else _chip("N/A", "info"))
+                cells.append(f"<b>{_sp_money_str(r.total)}</b>" if r.total is not None
+                             else _chip("N/A", "info"))
+                rows.append([_esc(r.channel)] + cells)
+            if not b.pending:
+                tc = []
+                for c in cats:
+                    v = b.cat_total(c)
+                    tc.append(f"<b>{_sp_money_str(v) if v is not None else '–'}</b>")
+                    tc.append(f"<b>{v/tot*100:.1f}%</b>" if (v is not None and tot) else "–")
+                rows.append(["<b>TOTAL</b>"] + tc + [f"<b>{_sp_money_str(tot)}</b>"])
+            head = ["Platform"] + [x for c in cats for x in (f"{c} ₹", f"{c} %")] + ["Total spend"]
+            out.append(_tbl(head, rows))
+        if t.issues:
+            out.append(_note("Sheet notes — shown as written or as N/A; nothing was corrected:"))
+            out.append(_tbl(["What the Spend Split sheet says"], [[_esc(i)] for i in t.issues]))
+    elif model is not None:
+        out.append(_h2("Spend Split — ad spend by category"))
+        out.append(f'<div>{_chip("not available", "warn")} '
+                   f'<span style="font:400 12px Segoe UI,Arial,sans-serif;color:{_MUTED}">'
+                   f'no Spend Split tab for {_esc(month_label)} (or the sheet could not be '
+                   f'read — check it is shared as Viewer with the service account).</span></div>')
 
     # Cross-sheet
     out.append(_h2("Cross-sheet check"))
