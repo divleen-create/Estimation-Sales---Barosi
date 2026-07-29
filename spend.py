@@ -332,9 +332,10 @@ if __name__ == "__main__":
         print(f"\n== {b.label} (to day {b.end_day}) "
               f"{'PENDING' if b.pending else f'total {b.grand_total():,.0f}'}")
         for r in b.rows:
+            # A share is only meaningful beside a figure — same rule as the card.
             bits = " | ".join(
-                f"{c}: " + ("N/A" if r.cats[c].spend is None else f"{r.cats[c].spend:,.0f}")
-                + ("" if r.cats[c].pct is None else f" ({r.cats[c].pct*100:.2f}%)")
+                f"{c}: " + ("N/A" if r.cats[c].spend is None else f"{r.cats[c].spend:,.0f}"
+                            + ("" if r.cats[c].pct is None else f" ({r.cats[c].pct*100:.2f}%)"))
                 for c in config.SPEND_CATEGORIES)
             print(f"   {r.channel:18} {bits} | total "
                   f"{'N/A' if r.total is None else f'{r.total:,.0f}'}")
