@@ -500,10 +500,16 @@ def _spend_card(m: ReportModel) -> str:
     one glance. A bucket dropdown switches windows (1-7th / 1-15th / …), defaulting
     to the latest one that has been filled in. Anything the sheet doesn't hold is
     N/A — never zero, never guessed.
+
+    The card is rendered inside the month pane, so the **month filter at the top
+    drives it**: pick another month and this card re-renders for that month, with
+    its own Window list. There is no month control inside the card — Window is the
+    only filter it owns. Months the Spend Split sheet doesn't cover still get the
+    card, carrying an explicit empty state instead of silently disappearing.
     """
     t = getattr(m, "spend", None)
     if not t or not t.buckets:
-        return ""
+        return _spend_empty_card(m, t)
     cats = config.SPEND_CATEGORIES
     latest = t.latest
     default_idx = t.buckets.index(latest) if latest else 0
@@ -574,6 +580,30 @@ def _spend_card(m: ReportModel) -> str:
             f'<span class="tag">Source: {_e(t.source)}</span></div>'
             f'<div class="tr-legend sp-legend">{legend}</div>'
             f'{"".join(panes)}</div>')
+
+
+def _spend_empty_card(m: ReportModel, t=None) -> str:
+    """Spend Split for a month the sheet doesn't cover. Rendered rather than
+    omitted so the month filter always lands on something that explains itself:
+    the sheet's history begins at config.SPEND_START_PERIOD (July 2026), so every
+    earlier month says so outright instead of the card vanishing."""
+    sy, sm = config.SPEND_START_PERIOD
+    start = _dt.date(sy, sm, 1).strftime("%B %Y")
+    if (m.year, m.month) < (sy, sm):
+        msg = (f'<b>No historical data.</b> Data populated from {_e(start)}. '
+               f'The Spend Split sheet starts there, so {_e(m.month_label)} has no '
+               f'category spend to show.')
+    elif t is None:
+        msg = (f'<b>No Spend Split data for {_e(m.month_label)}.</b> The sheet has no tab for '
+               f'this month yet — the card fills in by itself once that month is added '
+               f'(or the sheet could not be read).')
+    else:
+        msg = (f'<b>No spend windows found for {_e(m.month_label)}.</b> Tab '
+               f'<b>{_e(t.tab)}</b> exists but carries no “1-Nth” cumulative window yet.')
+    return (f'<div class="card spend">'
+            f'<div class="trend-head"><div class="name">Spend Split · ad spend by category</div>'
+            f'<div class="trend-ctrls"><span class="tag">Source: Spend Split</span></div></div>'
+            f'<div class="sp-empty" style="margin:2px 0 0">{msg}</div></div>')
 
 
 def _sp_money(v) -> str:
@@ -703,9 +733,9 @@ def _daily_pane(m: ReportModel, idx: int) -> str:
     hidden = "" if idx == 0 else " hidden"
     # Spend Split sits ABOVE the date-wise detail: it answers "where did the ad
     # money go this month" before the reader drops into day-level tables.
-    spend_block = _spend_card(m)
-    if spend_block:
-        spend_block = '<div class="section-label">Spend Split · category ad spend</div>' + spend_block
+    # Always present, so switching months never leaves a hole where the card was.
+    spend_block = ('<div class="section-label">Spend Split · category ad spend</div>'
+                   + _spend_card(m))
     daily_block = (spend_block
                    + '<div class="section-label">Date-wise detail</div>'
                    + _daily_filter_card(m, m.days_in_month))

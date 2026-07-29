@@ -400,6 +400,16 @@ def _layer_f_structure(models, html_text, results, complete: bool = True):
             chk(f"{parent} contribution strip rendered",
                 f"Contribution to {parent} GMV" in html_text, "")
     chk("freshness / data-notes card rendered", "Data notes · freshness" in html_text, "")
+    # Spend Split is driven by the month filter: exactly one card per month pane,
+    # and months the sheet doesn't cover must say so rather than render nothing.
+    if complete:
+        n_spend = html_text.count('class="card spend"')
+        chk("one Spend Split card per month", n_spend == len(models),
+            f"{n_spend} cards for {len(models)} months")
+    if any((m.year, m.month) < tuple(config.SPEND_START_PERIOD) for m in models):
+        chk("pre-start months state the Spend Split history limit",
+            "No historical data." in html_text,
+            f"expected the note for months before {config.SPEND_START_PERIOD}")
     if m0.pending_note:
         chk("pending-month note rendered", m0.pending_note in html_text, "")
 

@@ -186,9 +186,16 @@ Ghee, and everything else as Others. Its tabs are plain month names (`June`, `Ju
   estimated. A window nobody has filled in is marked *pending*. A share is only shown
   next to a ₹ figure. July's `1-15th` window is blank for everything except Amazon, and
   Amazon's `1-26th` is blank (T-2) — that's exactly what the card shows.
+- **Driven by the month filter.** The card is rendered inside the month pane, so the
+  **Month dropdown at the top filters it** — pick August and you get August's Spend
+  Split with August's windows. The card itself owns **only the Window filter**; there is
+  no second month control. Every month gets a card: months before the sheet's history
+  show *"No historical data. Data populated from July 2026."* rather than the card
+  vanishing, and a month ≥ July with no tab yet says so and fills in by itself when the
+  tab appears.
 - **Where it appears:** a **Spend Split** card immediately **above Date-wise detail**,
-  inside the month pane (so it follows the month picker). A *Window* dropdown switches
-  between `1-7th` / `1-15th` / `1-26th`, defaulting to the latest one with data. Each
+  inside the month pane. A *Window* dropdown switches between `1-7th` / `1-15th` /
+  `1-26th`, defaulting to the latest one with data. Each
   window shows category KPIs, one bar per platform (bar **length** = that platform's
   spend, **segments** = its category mix, sorted biggest first), and the full table with
   ₹ + % per category. Where an earlier window overlaps, an *Added since …* column shows
