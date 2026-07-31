@@ -226,13 +226,24 @@ def _layer_e_edges(model, ctx: EdgeContext, results):
     #      must equal Σ parts exactly.
     #    Either way the parts stay sub-channels (no day-wise table of their own).
     for r in model.rollups:
-        tol = REL_TOL if r.derived else config.ROLLUP_TOL
-        how = "derived from parts" if r.derived else f"entered; tol {tol:.0%}"
-        for key, pv, sv in (("GMV", r.entered_gmv, r.parts_gmv),
-                            ("LM", r.entered_lm, r.parts_lm)):
-            chk(f"{r.parent} {'=' if r.derived else '≈'} Σ sub-channels {key}",
-                _close(sv, pv, tol),
-                f"parts={sv:,.0f} parent={pv:,.0f} ({how})")
+        if r.derived:
+            # We summed it ourselves, so it must match exactly.
+            for key, pv, sv in (("GMV", r.entered_gmv, r.parts_gmv),
+                                ("LM", r.entered_lm, r.parts_lm)):
+                chk(f"{r.parent} = Σ sub-channels {key}", _close(sv, pv, REL_TOL),
+                    f"parts={sv:,.0f} parent={pv:,.0f} (derived from parts)")
+        else:
+            # Entered parent: compare LIKE-FOR-LIKE, over the days the split columns
+            # actually cover. The sub-columns are routinely filled a few days behind
+            # the parent; that lag is late data (advisory), not a wrong number, and
+            # must not stop the report publishing. Only a disagreement on the SAME
+            # days means one of the two figures is actually wrong.
+            chk(f"{r.parent} ≈ Σ sub-channels GMV (same days)",
+                _close(r.lfl_parts, r.lfl_parent, config.ROLLUP_TOL),
+                f"over the {r.parts_last:%d %b} days the split covers: "
+                f"parts={r.lfl_parts:,.0f} parent={r.lfl_parent:,.0f} "
+                f"(tol {config.ROLLUP_TOL:.0%}; full-column gap {r.gap:,.0f} is reported "
+                f"separately)" if r.parts_last else "no days covered by the split")
         shares = [s for _, _, s in r.parts if s is not None]
         chk(f"{r.parent} contribution shares are sane",
             all(0 <= s <= 1.0001 for s in shares),
@@ -644,6 +655,34 @@ def advisories(model, models=None, ctx: Optional[EdgeContext] = None) -> list[Ad
                         (", ".join(extra) + " — add to config.AD_CHANNELS to make it expected")
                         if extra else "ad channels match config"))
 
+    # 5a) Entered parent vs its split columns — the full-column gap, and whether it
+    #     is simply the split lagging behind the parent (the usual cause).
+    for r in getattr(model, "rollups", []):
+        if r.derived:
+            continue
+        lfl_ok = _close(r.lfl_parts, r.lfl_parent, config.ROLLUP_TOL)
+        if r.lag_days and lfl_ok:
+            level, why = "WARN", (
+                f"the split columns are {r.lag_days} day(s) behind — "
+                f"{', '.join(n for n, _, _ in r.parts)} filled to "
+                f"{r.parts_last:%d %b}, {r.parent} to {r.parent_last:%d %b}. Over the "
+                f"days both cover they agree ({fmt.gmv_auto(r.lfl_parts)} vs "
+                f"{fmt.gmv_auto(r.lfl_parent)}), so the "
+                f"{fmt.gmv_auto(r.gap)} full-month gap is unfilled days, not a "
+                f"discrepancy. The contribution split is as of {r.parts_last:%d %b}")
+        elif not lfl_ok:
+            level, why = "WARN", (
+                f"parts and parent DISAGREE on the same days: "
+                f"{fmt.gmv_auto(r.lfl_parts)} vs {fmt.gmv_auto(r.lfl_parent)} — "
+                f"check the sheet")
+        else:
+            level, why = "OK", (
+                f"{r.parent} as entered {fmt.gmv_auto(r.entered_gmv)} vs its parts "
+                f"{fmt.gmv_auto(r.parts_gmv)} — gap {fmt.gmv_auto(r.gap)}"
+                + (f" ({r.gap_pct*100:+.2f}%)" if r.gap_pct is not None else "")
+                + ", split up to date")
+        out.append(Advisory(level, f"{r.parent} split vs parent", why))
+
     # 5b) A parent built from its parts inherits only what the parts carry.
     for r in getattr(model, "rollups", []):
         if not r.derived:
@@ -939,7 +978,15 @@ def summary_text(results, freshness: list[Freshness], conflicts=None,
                       f"({' + '.join(n for n, _, _ in r.parts)})",
                       f"    GAP (entered-Σ)  : {r.gap:>15,.0f}"
                       + (f"  ({r.gap_pct*100:+.2f}% of {r.parent})" if r.gap_pct is not None else ""),
-                      f"    LM gap           : {r.lm_gap:>15,.0f}",
+                      f"    LM gap           : {r.lm_gap:>15,.0f}"]
+            if not r.derived and r.lag_days:
+                lines += [f"    NOTE: the split columns are {r.lag_days} day(s) behind "
+                          f"({r.parts_last:%d %b} vs {r.parent_last:%d %b} for {r.parent}).",
+                          f"    Same-day check   : parts {r.lfl_parts:,.0f} vs parent "
+                          f"{r.lfl_parent:,.0f}"
+                          + (f" ({r.lfl_gap_pct*100:+.2f}%)" if r.lfl_gap_pct is not None else "")
+                          + " — so the gap above is unfilled days, not a discrepancy."]
+            lines += [
                       "    split: " + " · ".join(
                           f"{n} {fmt.gmv_auto(g)} = {s*100:.1f}%" if s is not None else f"{n} –"
                           for n, g, s in r.parts)]
@@ -1150,6 +1197,19 @@ def summary_html(results, freshness: list[Freshness], conflicts=None, month_labe
             if r.lm_gap:
                 out.append(_note(f"{_esc(r.parent)} LM gap: <b>{r.lm_gap:,.0f}</b> "
                                  f"(LM entered {r.entered_lm:,.0f} vs Σ parts {r.parts_lm:,.0f})."))
+            if not r.derived and r.lag_days:
+                fgw, bgw = _C["warn"]
+                out.append(
+                    f'<div style="background:{bgw};color:{fgw};padding:10px 12px;'
+                    f'border-radius:4px;font:400 12px Segoe UI,Arial,sans-serif">'
+                    f'<b>The {_esc(r.parent)} split is {r.lag_days} day(s) behind.</b> '
+                    f'{_esc(", ".join(n for n, _, _ in r.parts))} are filled to '
+                    f'<b>{r.parts_last:%d %b}</b>, {_esc(r.parent)} to '
+                    f'<b>{r.parent_last:%d %b}</b>. Over the days both cover they agree '
+                    f'({r.lfl_parts:,.0f} vs {r.lfl_parent:,.0f}), so the '
+                    f'{r.gap:,.0f} gap above is unfilled days — not a discrepancy. '
+                    f'The contribution split shown on the report is as of '
+                    f'{r.parts_last:%d %b}.</div>')
 
     # Spend Split
     t = getattr(model, "spend", None) if model is not None else None

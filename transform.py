@@ -90,6 +90,17 @@ class Rollup:
     parts_lm: float
     lm_gap: float
     parts: list = field(default_factory=list)   # [(name, gmv, share_of_parent)]
+    # Like-for-like: the same comparison restricted to the days the sub-channels
+    # actually cover. The split columns are often filled a few days behind the
+    # parent, and that lag alone must not read as a discrepancy — only a
+    # disagreement on the SAME days is a real problem.
+    lfl_parent: float = 0.0
+    lfl_parts: float = 0.0
+    lfl_gap: float = 0.0
+    lfl_gap_pct: Optional[float] = None
+    parent_last: Optional[_dt.date] = None
+    parts_last: Optional[_dt.date] = None
+    lag_days: int = 0
 
 
 @dataclass
@@ -233,6 +244,15 @@ def _rollups(summaries: list[ChannelSummary], derived_notes) -> list[Rollup]:
             continue
         pg = sum(x.gmv_mtd for x in parts)
         pl = sum(x.lm_mtd for x in parts)
+        # Like-for-like over the days the parts cover, so a lagging split column
+        # shows up as a lag rather than as a mismatch.
+        part_days = {d.date for x in parts for d in x.daily if d.gmv is not None}
+        lfl_parent = sum(d.gmv for d in p.daily if d.gmv is not None and d.date in part_days)
+        lfl_parts = sum(d.gmv for x in parts for d in x.daily
+                        if d.gmv is not None and d.date in part_days)
+        parts_last = max(part_days) if part_days else None
+        lag = ((p.last_date - parts_last).days
+               if (p.last_date and parts_last and p.last_date > parts_last) else 0)
         out.append(Rollup(
             parent=parent, derived=parent in was_derived,
             entered_gmv=p.gmv_mtd, parts_gmv=pg,
@@ -241,6 +261,10 @@ def _rollups(summaries: list[ChannelSummary], derived_notes) -> list[Rollup]:
             entered_lm=p.lm_mtd, parts_lm=pl, lm_gap=p.lm_mtd - pl,
             parts=[(x.name, x.gmv_mtd, (x.gmv_mtd / p.gmv_mtd) if p.gmv_mtd else None)
                    for x in parts],
+            lfl_parent=lfl_parent, lfl_parts=lfl_parts,
+            lfl_gap=lfl_parent - lfl_parts,
+            lfl_gap_pct=((lfl_parent - lfl_parts) / lfl_parent) if lfl_parent else None,
+            parent_last=p.last_date, parts_last=parts_last, lag_days=lag,
         ))
     return out
 

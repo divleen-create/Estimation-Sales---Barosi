@@ -343,6 +343,14 @@ def _contrib_strip(sec: Section, parent: str, rollup=None) -> str:
         if rollup.derived:
             note = (f'<span class="cp"><b>{_e(parent)} built from these parts</b> — '
                     f'the sheets carry no {_e(parent)} column</span>')
+        elif getattr(rollup, "lag_days", 0) and rollup.parts_last:
+            # The usual case: the split columns are filled a few days behind the
+            # parent. Say so, rather than letting it read as a missing chunk.
+            note = (f'<span class="cp">Split is as of <b>{rollup.parts_last:%d %b}</b> — '
+                    f'{rollup.lag_days} day(s) behind {_e(parent)} '
+                    f'({rollup.parent_last:%d %b}); the '
+                    f'<b>{fmt.gmv_auto(rollup.gap)}</b> difference is those unfilled days, '
+                    f'not a gap in {_e(parent)}</span>')
         elif abs(rollup.gap) > max(1.0, 0.005 * (rollup.entered_gmv or 1)):
             note = (f'<span class="cp">Unattributed <b>{fmt.gmv_auto(rollup.gap)}</b> '
                     f'({fmt.pct_plain(rollup.gap_pct or 0)}) — {_e(parent)} as entered '
