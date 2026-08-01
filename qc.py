@@ -104,16 +104,20 @@ def _layer_a_sheet_vs_model(model, diags, results):
 def _layer_b_identities(model, results):
     dim = model.days_in_month
     for s in model.sections:
+        # Sub-channels (Amazon Core, NOW+Fresh) are a SPLIT of their parent, already
+        # inside the parent's own GMV — excluded from the subtotal so nothing is
+        # counted twice; layer E separately proves parent ~ sum of its subs.
+        topline = [c for c in s.channels if c.cadence != "sub"]
         for key, tot, chsum in [
-            ("Σunits", s.totals.units_mtd, sum(c.units_mtd for c in s.channels)),
-            ("ΣGMV", s.totals.gmv_mtd, sum(c.gmv_mtd for c in s.channels)),
-            ("ΣLM", s.totals.lm_mtd, sum(c.lm_mtd for c in s.channels)),
-            ("Σad", s.totals.ad_mtd, sum(c.ad_mtd for c in s.channels)),
-            ("Σest", s.totals.estimate, sum(c.estimate for c in s.channels)),
-            ("Σgap", s.totals.gap, sum(c.gap for c in s.channels)),
+            ("Σunits", s.totals.units_mtd, sum(c.units_mtd for c in topline)),
+            ("ΣGMV", s.totals.gmv_mtd, sum(c.gmv_mtd for c in topline)),
+            ("ΣLM", s.totals.lm_mtd, sum(c.lm_mtd for c in topline)),
+            ("Σad", s.totals.ad_mtd, sum(c.ad_mtd for c in topline)),
+            ("Σest", s.totals.estimate, sum(c.estimate for c in topline)),
+            ("Σgap", s.totals.gap, sum(c.gap for c in topline)),
         ]:
-            results.append(("B identities", f"{s.name} {key}", _close(tot, chsum),
-                            f"{tot:,.1f} vs {chsum:,.1f}"))
+            results.append(("B identities", f"{s.name} {key} (excl. sub-channels)",
+                            _close(tot, chsum), f"{tot:,.1f} vs {chsum:,.1f}"))
         for c in s.channels:
             results.append(("B identities", f"{c.name} gap=est-gmv",
                             _close(c.gap, c.estimate - c.gmv_mtd), ""))

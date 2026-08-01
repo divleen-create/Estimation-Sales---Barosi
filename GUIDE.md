@@ -139,6 +139,14 @@ headers like **`March GMV` / `Total Value`** that used to be silently dropped (â
 
 ## 3b. Parent vs sub-channels (Amazon = Core + NOW+Fresh)
 
+**Sub-channels never add to the subtotal.** Amazon Core and Amazon NOW+Fresh are a
+*split* of Amazon, not extra business â€” Amazon's own GMV already includes them. They
+still get their own row (tagged "of Amazon") and the contribution strip, but the
+Marketplace & D2C **Total** row, and the overall **grand total**, sum only the
+top-line channels (`cadence != "sub"`). Before 2026-07-31 the subtotal mistakenly
+summed everything, silently double-counting Amazon's business.
+
+
 `config.SUBCHANNELS` declares that **Amazon Core** and **Amazon NOW+Fresh** are parts
 of **Amazon**. Two situations, both handled automatically:
 

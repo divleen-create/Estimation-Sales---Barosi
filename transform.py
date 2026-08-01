@@ -202,16 +202,23 @@ def build_report(period=None) -> ReportModel:
         daily_dates = sorted({c.date for ch in chans if ch.cadence == "daily"
                                for c in ch.daily if c.gmv is not None})
         last = max((c.last_date for c in chans if c.last_date), default=None)
-        return Section(name=name, channels=chans, totals=_totals(chans),
+        # Sub-channels (Amazon Core, Amazon NOW+Fresh) are a SPLIT of their parent,
+        # not additional business — Amazon's own GMV already includes them. They
+        # stay in section.channels (shown as their own row, tagged "of Amazon" via
+        # _PARENT_OF, with the contribution strip) but are excluded from the
+        # section subtotal / grand total so nothing is counted twice.
+        totalled = [c for c in chans if c.cadence != "sub"]
+        return Section(name=name, channels=chans, totals=_totals(totalled),
                        dates=daily_dates, last_date=last)
 
     # Drop a section with no channels (e.g. older months that predate the
     # Marketplace & D2C sheet show only Quick Commerce).
     sections = [s for s in (section("Quick Commerce", qc),
                             section("Marketplace & D2C", mkt)) if s.channels]
-    grand = _totals(summaries)
+    # Same exclusion for the grand total: subs are folded into their parent already.
+    grand = _totals([c for c in summaries if c.cadence != "sub"])
 
-    ranked = [c for c in summaries if c.growth is not None]
+    ranked = [c for c in summaries if c.growth is not None and c.cadence != "sub"]
     best = max(ranked, key=lambda c: c.growth, default=None)
     worst = min(ranked, key=lambda c: c.growth, default=None)
     as_of = max((s.last_date for s in sections if s.last_date), default=None)
@@ -306,9 +313,10 @@ def link_previous(models: list[ReportModel]) -> None:
                         cell.lm_gmv = pv
                         cell.growth = (_safe_growth(cell.gmv, pv)
                                        if (cell.gmv is not None and pv) else None)
-            s.totals = _totals(s.channels)
-        m.grand = _totals([c for s in m.sections for c in s.channels])
-        ranked = [c for s in m.sections for c in s.channels if c.growth is not None]
+            s.totals = _totals([c for c in s.channels if c.cadence != "sub"])
+        m.grand = _totals([c for s in m.sections for c in s.channels if c.cadence != "sub"])
+        ranked = [c for s in m.sections for c in s.channels
+                  if c.growth is not None and c.cadence != "sub"]
         m.best_channel = max(ranked, key=lambda c: c.growth).name if ranked else None
         m.worst_channel = min(ranked, key=lambda c: c.growth).name if ranked else None
 
