@@ -316,9 +316,21 @@ def _layer_e_edges(model, ctx: EdgeContext, results):
 
     # 4) Ad columns: every channel expected to carry Ad Sales still does. Losing
     #    one silently shows Ad Sales 0 — the same failure mode as the GMV bug.
+    #    Skip the first few days of a new month: some channels' ad spend arrives
+    #    T-2 (config.AD_LAG_DAYS), so a fresh month can legitimately have zero ad
+    #    days on the books yet — that is a lag, not a lost column. Gate on the
+    #    CHANNEL'S OWN latest GMV day, not the calendar date — a build that runs
+    #    before the sheet's own GMV catches up must not fail just because the
+    #    real-world clock has moved past the lag window (2026-08-03 bug: Blinkit's
+    #    GMV was only filled to 02 Aug, so its T-2 ad legitimately had no days yet,
+    #    but the calendar-day gate had already opened).
     for name in sorted(config.AD_CHANNELS & set(chans) - built):
+        lag = config.AD_LAG_DAYS.get(name, 0)
+        data_day = chans[name].last_date.day if chans[name].last_date else 0
+        if data_day <= lag:
+            continue                        # too early in the DATA for any ad day yet
         chk(f"{name} Ad Sales column present", chans[name].has_ad,
-            f"ad_mtd={chans[name].ad_mtd:,.0f}")
+            f"ad_mtd={chans[name].ad_mtd:,.0f}, GMV filled to day {data_day}, T-{lag} lag")
 
     # 5) Dropped source columns really are dropped (Shopify 'Total Sale' = net,
     #    'Dolchi' = sub-brand split): GMV must stay the gross 'Value' column.
